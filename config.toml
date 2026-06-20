@@ -1,0 +1,15 @@
+[paths]
+artifacts_dir = "/tmp/pkgids/artifacts"
+reports_dir   = "/tmp/pkgids/reports"
+
+[sandbox]
+image        = "pkgids-sandbox:latest"
+timeout_secs = 120
+network      = "none"
+
+[scoring]
+malicious_threshold  = 0.8
+suspicious_threshold = 0.5
+
+[logging]
+level = "INFO"

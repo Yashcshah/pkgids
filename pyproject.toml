@@ -1,0 +1,21 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "pkgids"
+version         = "0.1.0"
+description     = "Safely analyze software packages for malicious behavior"
+readme          = "README.md"
+requires-python = ">=3.11"
+dependencies    = []
+
+[project.scripts]
+pkgids = "pkgids.cli:entry_point"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pkgids*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

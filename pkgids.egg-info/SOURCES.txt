@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+pkgids/__init__.py
+pkgids/analyze.py
+pkgids/capture.py
+pkgids/cli.py
+pkgids/config.py
+pkgids/fetch.py
+pkgids/report.py
+pkgids/sandbox.py
+pkgids/score.py
+pkgids.egg-info/PKG-INFO
+pkgids.egg-info/SOURCES.txt
+pkgids.egg-info/dependency_links.txt
+pkgids.egg-info/entry_points.txt
+pkgids.egg-info/top_level.txt
+tests/test_cli.py

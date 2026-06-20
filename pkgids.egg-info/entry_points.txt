@@ -1,0 +1,2 @@
+[console_scripts]
+pkgids = pkgids.cli:entry_point
