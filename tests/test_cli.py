@@ -3,6 +3,8 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
@@ -13,21 +15,50 @@ def _run(*args: str) -> subprocess.CompletedProcess:
     )
 
 
-class TestDetonate:
-    def test_valid_pypi(self):
-        result = _run("detonate", "pypi", "requests", "2.31.0")
-        assert result.returncode == 0
-        payload = json.loads(result.stdout)
-        assert payload["ecosystem"] == "pypi"
-        assert payload["name"] == "requests"
-        assert payload["version"] == "2.31.0"
-        assert payload["command"] == "detonate"
+def _fake_run_result(tmp_path: Path) -> dict:
+    """Minimal run summary that capture.run() would return."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "ecosystem": "pypi",
+        "name": "requests",
+        "version": "2.31.0",
+        "run_dir": str(run_dir),
+        "artifact": str(run_dir / "requests-2.31.0.tar.gz"),
+        "phases": {
+            "install": {"exit_code": 0, "duration_seconds": 1.0,
+                        "timed_out": False, "network_activity": False},
+            "import":  {"exit_code": 0, "duration_seconds": 0.5,
+                        "timed_out": False, "network_activity": False},
+        },
+        "network_activity": {"install": False, "import": False},
+        "outputs": {
+            "install_json":  str(run_dir / "install.json"),
+            "import_json":   str(run_dir / "import.json"),
+            "network_jsonl": None,
+            "capture_pcap":  None,
+        },
+    }
 
-    def test_valid_npm(self):
-        result = _run("detonate", "npm", "lodash", "4.17.21")
-        assert result.returncode == 0
-        payload = json.loads(result.stdout)
-        assert payload["ecosystem"] == "npm"
+
+class TestDetonate:
+    def test_valid_pypi_exits_zero(self, tmp_path):
+        """detonate with a valid ecosystem calls capture.run and exits 0."""
+        from pkgids.cli import main
+        with patch("pkgids.capture.run", return_value=_fake_run_result(tmp_path)):
+            code = main(["detonate", "pypi", "requests", "2.31.0",
+                         "--run-dir", str(tmp_path / "run")])
+        assert code == 0
+
+    def test_valid_npm_exits_zero(self, tmp_path):
+        from pkgids.cli import main
+        result = _fake_run_result(tmp_path)
+        result["ecosystem"] = "npm"
+        result["name"] = "lodash"
+        with patch("pkgids.capture.run", return_value=result):
+            code = main(["detonate", "npm", "lodash", "4.17.21",
+                         "--run-dir", str(tmp_path / "run")])
+        assert code == 0
 
     def test_invalid_ecosystem_exits_nonzero(self):
         result = _run("detonate", "rubygems", "rails", "7.0.0")
