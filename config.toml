@@ -1,6 +1,6 @@
 [paths]
-artifacts_dir = "/tmp/pkgids/artifacts"
-reports_dir   = "/tmp/pkgids/reports"
+artifacts_dir = "artifacts"
+reports_dir   = "reports"
 
 [sandbox]
 image        = "pkgids-sandbox:latest"
