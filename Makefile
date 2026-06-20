@@ -1,4 +1,6 @@
-.PHONY: install test
+.PHONY: install test sandbox-image
+
+SANDBOX_IMAGE := pkgids-sandbox
 
 VENV   := .venv
 PYTHON := $(VENV)/Scripts/python
@@ -12,3 +14,6 @@ install:
 
 test:
 	$(VENV)/Scripts/pytest -v
+
+sandbox-image:
+	docker build -f Dockerfile.sandbox -t $(SANDBOX_IMAGE) .
