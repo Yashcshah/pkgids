@@ -199,6 +199,26 @@ def run_in_sandbox(
         stderr=subprocess.PIPE,
     )
 
+    # For fake mode: poll for the container's detonet IP immediately after
+    # startup, BEFORE proc.communicate() blocks.  Docker clears NetworkSettings
+    # the moment a container exits, so we must read it while it is still running.
+    # 30 × 0.1 s = up to 3 s for the container to appear in the network table.
+    if network == "fake":
+        detonet_ip: str | None = None
+        for _ in range(30):
+            detonet_ip = _container_ip_on_network(container_name, fi_network)
+            if detonet_ip:
+                break
+            time.sleep(0.1)
+        if detonet_ip:
+            capture_log = str(fi_logs_dir / f"{detonet_ip}.jsonl")
+        else:
+            print(
+                f"[sandbox] WARNING: could not determine detonet IP for "
+                f"{container_name!r} — capture_log will be None",
+                flush=True,
+            )
+
     try:
         stdout_b, stderr_b = proc.communicate(timeout=effective_timeout)
     except subprocess.TimeoutExpired:
@@ -206,12 +226,6 @@ def run_in_sandbox(
         stdout_b, stderr_b = proc.communicate()
         timed_out = True
     finally:
-        # For fake mode: inspect the container's detonet IP before removing it.
-        # (Container still exists here because we omitted --rm.)
-        if network == "fake":
-            detonet_ip = _container_ip_on_network(container_name, fi_network)
-            if detonet_ip:
-                capture_log = str(fi_logs_dir / f"{detonet_ip}.jsonl")
         _force_remove(container_name)
 
     return {
