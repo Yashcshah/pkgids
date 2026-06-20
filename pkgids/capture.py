@@ -65,9 +65,9 @@ def _install_command(ecosystem: str, artifact_name: str) -> list[str]:
     if ecosystem == "pypi":
         return [
             "pip3", "install",
+            "--break-system-packages",
             "--no-build-isolation",
             "--no-deps",
-            "--user",
             f"/work/{artifact_name}",
         ]
     if ecosystem == "npm":
@@ -125,6 +125,22 @@ def _make_run_dir(ecosystem: str, name: str, version: str) -> Path:
 
 
 # ── internal bookkeeping ──────────────────────────────────────────────────────
+
+def _collect_fallback_logs(fi_logs_dir: Path, since: float) -> list[Path]:
+    """Return every .jsonl in fi_logs_dir modified at or after *since* (epoch).
+
+    Used when a phase's capture_log is None (IP detection failed) so we never
+    silently discard captured traffic — any log written during the run window
+    is included in network.jsonl.  A 1-second buffer handles filesystem latency.
+    """
+    if not fi_logs_dir.exists():
+        return []
+    return sorted(
+        (p for p in fi_logs_dir.glob("*.jsonl")
+         if p.stat().st_mtime >= since - 1.0),
+        key=lambda p: p.stat().st_mtime,
+    )
+
 
 def _has_network(result: dict) -> bool:
     """Return True if the sandbox result has a non-empty capture log."""
@@ -189,6 +205,7 @@ def run(
         fi_logs_dir = Path(__file__).parent.parent / fi_logs_dir
 
     # ── 1. Fetch ──────────────────────────────────────────────────────────────
+    run_start = time.time()   # epoch — used for fallback log collection
     print(f"[detonate] fetching {ecosystem}:{name}=={version} ...", flush=True)
     artifact = fetch(ecosystem, name, version)
     artifact_dir = artifact.parent
@@ -260,15 +277,36 @@ def run(
     # ── 7. Aggregate fake-internet logs into network.jsonl ────────────────────
     network_jsonl = run_dir / "network.jsonl"
     seen_logs: set[str] = set()
-    for result in (install_result, import_result):
-        log = result.get("capture_log")
-        if log and log not in seen_logs and Path(log).exists():
-            seen_logs.add(log)
-            if not network_jsonl.exists():
-                shutil.copy2(log, network_jsonl)
-            else:
-                with open(network_jsonl, "a") as out, open(log) as inp:
-                    out.write(inp.read())
+
+    def _append_log(src: Path) -> None:
+        key = str(src)
+        if key in seen_logs or not src.exists():
+            return
+        seen_logs.add(key)
+        if not network_jsonl.exists():
+            shutil.copy2(src, network_jsonl)
+        else:
+            with open(network_jsonl, "a") as out, open(src) as inp:
+                out.write(inp.read())
+
+    # Primary path: use capture_log paths returned by each sandbox phase
+    for phase_result in (install_result, import_result):
+        log = phase_result.get("capture_log")
+        if log:
+            _append_log(Path(log))
+
+    # Fallback: if no logs were collected (IP detection failed for all phases),
+    # grab every .jsonl in fi_logs_dir written during the run window so traffic
+    # is never silently lost.
+    if not network_jsonl.exists():
+        for p in _collect_fallback_logs(fi_logs_dir, run_start):
+            _append_log(p)
+        if network_jsonl.exists():
+            print(
+                "[detonate] WARNING: capture_log IP detection failed; "
+                "network.jsonl built from fallback logs",
+                flush=True,
+            )
 
     # ── 8. Write run.json ─────────────────────────────────────────────────────
     summary: dict = {

@@ -33,9 +33,13 @@ class TestInstallCommand:
         cmd = _install_command("pypi", "six-1.16.0.tar.gz")
         assert "--no-deps" in cmd
 
-    def test_pypi_user_flag(self):
+    def test_pypi_break_system_packages(self):
         cmd = _install_command("pypi", "six-1.16.0.tar.gz")
-        assert "--user" in cmd
+        assert "--break-system-packages" in cmd
+
+    def test_pypi_no_user_flag(self):
+        cmd = _install_command("pypi", "six-1.16.0.tar.gz")
+        assert "--user" not in cmd
 
     def test_pypi_artifact_path(self):
         cmd = _install_command("pypi", "six-1.16.0.tar.gz")
