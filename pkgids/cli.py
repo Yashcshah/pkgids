@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── detonate ──────────────────────────────────────────────────────────────
     detonate = subparsers.add_parser(
         "detonate",
-        help="Fetch and detonate a package in an isolated sandbox.",
+        help="Fetch, install, and observe a package in an isolated sandbox.",
     )
     detonate.add_argument(
         "ecosystem",
@@ -25,6 +25,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     detonate.add_argument("name", help="Package name")
     detonate.add_argument("version", help="Package version")
+    detonate.add_argument(
+        "--skip-import",
+        action="store_true",
+        default=False,
+        help="Skip the import phase (overrides config detonation.skip_import)",
+    )
+    detonate.add_argument(
+        "--run-dir",
+        metavar="DIR",
+        default=None,
+        help="Write run artifacts to DIR instead of the auto-generated runs/<id>/ path",
+    )
 
     # ── fetch ─────────────────────────────────────────────────────────────────
     fetch_cmd = subparsers.add_parser(
@@ -58,13 +70,25 @@ def cmd_detonate(args: argparse.Namespace) -> int:
     code = _validate_ecosystem(args.ecosystem)
     if code is not None:
         return code
-    job = {
-        "command": "detonate",
-        "ecosystem": args.ecosystem,
-        "name": args.name,
-        "version": args.version,
-    }
-    print(json.dumps(job, indent=2))
+
+    from .capture import run as _run   # local import keeps startup fast
+
+    skip_import = True if args.skip_import else None   # None → defer to config
+    run_dir = args.run_dir                             # None → auto-generate
+
+    try:
+        summary = _run(
+            args.ecosystem,
+            args.name,
+            args.version,
+            run_dir=run_dir,
+            skip_import=skip_import,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(summary, indent=2))
     return 0
 
 
@@ -73,7 +97,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if code is not None:
         return code
 
-    from .fetch import fetch  # local import keeps startup fast
+    from .fetch import fetch
 
     try:
         artifact = fetch(args.ecosystem, args.name, args.version)
@@ -87,9 +111,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         metadata = json.loads(metadata_path.read_text())
 
     summary = {
-        "artifact": str(artifact),
-        "upload_time": metadata.get("upload_time"),
-        "file_count": metadata.get("file_count"),
+        "artifact":      str(artifact),
+        "upload_time":   metadata.get("upload_time"),
+        "file_count":    metadata.get("file_count"),
         "install_hooks": metadata.get("install_hooks"),
     }
     print(json.dumps(summary, indent=2))
