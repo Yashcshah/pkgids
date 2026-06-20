@@ -10,17 +10,17 @@ from pathlib import Path
 
 from . import config as _cfg
 
-_SUPPORTED_NETWORKS = {"none", "default"}
+_SUPPORTED_NETWORKS = {"none", "default", "fake"}
 
+
+# ── host-side helpers ─────────────────────────────────────────────────────────
 
 def _make_world_readable(path: Path) -> None:
-    """Ensure *path* and every item in its subtree are readable and traversable
-    by any UID.
+    """Ensure *path* and its subtree are traversable and readable by any UID.
 
-    Directories get at least r-x for group + other (0o055 OR'd in) so that
-    unprivileged users — including the container's 'deton' account — can enter
-    and list them.  Regular files get at least r for group + other (0o044).
-    This is called automatically on workdir_host before every bind-mount.
+    Directories get at least r-x for group + other; files get at least r.
+    Called automatically on workdir_host before every bind-mount so that the
+    unprivileged 'deton' user inside the container can reach the files.
     """
     path.chmod(path.stat().st_mode | 0o555)
     for root, dirs, files in os.walk(path):
@@ -54,6 +54,33 @@ def _container_exists(name: str) -> bool:
     return name in r.stdout.splitlines()
 
 
+def _container_running(name: str) -> bool:
+    """Return True if *name* is currently in the 'running' state."""
+    r = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Running}}", name],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return r.stdout.strip() == "true"
+
+
+def _container_ip_on_network(container: str, network: str) -> str | None:
+    """Return the container's IP address on *network*, or None."""
+    # The Go template uses the network name as a map key.
+    fmt = "{{{{.NetworkSettings.Networks.{}.IPAddress}}}}".format(network)
+    r = subprocess.run(
+        ["docker", "inspect", "--format", fmt, container],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    ip = r.stdout.strip()
+    return ip if ip else None
+
+
+# ── public API ────────────────────────────────────────────────────────────────
+
 def run_in_sandbox(
     command: list[str] | str,
     workdir_host: Path | None = None,
@@ -71,18 +98,22 @@ def run_in_sandbox(
         Command for the container.  A ``str`` is wrapped as ``["sh", "-c", ...]``;
         a list is passed directly.
     workdir_host:
-        Optional host path bind-mounted read-only at ``/work`` inside the container.
+        Optional host path bind-mounted read-only at ``/work`` inside the
+        container.  Permissions are widened to world-readable before mounting.
     network:
-        ``"none"`` (default) — air-gap the container.
+        ``"none"``    — air-gap (no networking at all).
         ``"default"`` — Docker bridge (outbound internet).
+        ``"fake"``    — isolated detonet; all traffic captured by the
+                        fake-internet appliance.  ``pkgids-fakeinternet``
+                        must be running before calling with this mode.
     timeout:
-        Wall-clock seconds.  Overrides the ``sandbox.timeout_secs`` config value.
+        Wall-clock seconds.  Overrides ``sandbox.timeout_secs`` in config.
 
     Returns
     -------
     dict:
         stdout, stderr, exit_code, timed_out (bool), duration_seconds,
-        container_name  (useful for cleanup verification).
+        container_name, capture_log (path to JSONL log, fake mode only).
     """
     if network not in _SUPPORTED_NETWORKS:
         raise ValueError(
@@ -90,7 +121,9 @@ def run_in_sandbox(
             f"Supported: {sorted(_SUPPORTED_NETWORKS)}"
         )
 
-    cfg = _cfg.get()["sandbox"]
+    cfg      = _cfg.get()["sandbox"]
+    fi_cfg   = _cfg.get().get("fakeinternet", {})
+
     image             = cfg.get("image",        "pkgids-sandbox:latest")
     runtime           = cfg.get("runtime",      "runsc")
     memory            = cfg.get("memory",       "1g")
@@ -100,16 +133,39 @@ def run_in_sandbox(
         timeout if timeout is not None else cfg.get("timeout_secs", 120)
     )
 
-    docker_network = "bridge" if network == "default" else "none"
-    container_name = f"pkgids-{uuid.uuid4().hex[:12]}"
+    fi_network        = fi_cfg.get("network",        "detonet")
+    fi_container      = fi_cfg.get("container_name", "pkgids-fakeinternet")
+    fi_ip             = fi_cfg.get("ip",             "10.200.200.2")
+    fi_logs_dir       = Path(fi_cfg.get("logs_dir",  "logs/fakeinternet"))
+    if not fi_logs_dir.is_absolute():
+        fi_logs_dir = Path(__file__).parent.parent / fi_logs_dir
 
+    # ── resolve docker network ────────────────────────────────────────────────
+    if network == "none":
+        docker_network = "none"
+    elif network == "default":
+        docker_network = "bridge"
+    else:  # "fake"
+        if not _container_running(fi_container):
+            raise RuntimeError(
+                f"fake network requested but '{fi_container}' is not running. "
+                f"Run 'make fakeinternet-start' first."
+            )
+        docker_network = fi_network
+
+    container_name = f"pkgids-{uuid.uuid4().hex[:12]}"
     inner: list[str] = (
         ["sh", "-c", command] if isinstance(command, str) else list(command)
     )
 
-    docker_cmd: list[str] = [
-        "docker", "run",
-        "--rm",
+    # --rm is omitted for "fake" mode so we can inspect the container's IP
+    # in the finally block (before _force_remove wipes it).
+    use_auto_remove = (network != "fake")
+
+    docker_cmd: list[str] = ["docker", "run"]
+    if use_auto_remove:
+        docker_cmd.append("--rm")
+    docker_cmd += [
         "--name",       container_name,
         "--runtime",    runtime,
         "--network",    docker_network,
@@ -117,9 +173,11 @@ def run_in_sandbox(
         "--cpus",       cpus,
         "--pids-limit", pids_limit,
         "--user",       "deton",
-        # writable in-memory scratch — no host path exposed
-        "--mount", "type=tmpfs,target=/scratch,tmpfs-size=256m",
+        "--mount",      "type=tmpfs,target=/scratch,tmpfs-size=256m",
     ]
+
+    if network == "fake":
+        docker_cmd += ["--dns", fi_ip]
 
     if workdir_host is not None:
         wh = Path(workdir_host).resolve()
@@ -131,8 +189,9 @@ def run_in_sandbox(
 
     docker_cmd += [image] + inner
 
-    timed_out = False
-    t_start = time.monotonic()
+    timed_out     = False
+    capture_log: str | None = None
+    t_start       = time.monotonic()
 
     proc = subprocess.Popen(
         docker_cmd,
@@ -147,7 +206,12 @@ def run_in_sandbox(
         stdout_b, stderr_b = proc.communicate()
         timed_out = True
     finally:
-        # Belt-and-suspenders: remove even if --rm already cleaned up.
+        # For fake mode: inspect the container's detonet IP before removing it.
+        # (Container still exists here because we omitted --rm.)
+        if network == "fake":
+            detonet_ip = _container_ip_on_network(container_name, fi_network)
+            if detonet_ip:
+                capture_log = str(fi_logs_dir / f"{detonet_ip}.jsonl")
         _force_remove(container_name)
 
     return {
@@ -157,4 +221,5 @@ def run_in_sandbox(
         "timed_out":        timed_out,
         "duration_seconds": round(time.monotonic() - t_start, 3),
         "container_name":   container_name,
+        "capture_log":      capture_log,
     }
