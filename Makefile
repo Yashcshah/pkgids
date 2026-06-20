@@ -5,8 +5,8 @@
 # ── Python / Windows paths ────────────────────────────────────────────────────
 SANDBOX_IMAGE := pkgids-sandbox
 VENV          := .venv
-PYTHON        := $(VENV)/Scripts/python
-PIP           := $(VENV)/Scripts/pip
+PYTHON        := $(VENV)/bin/python
+PIP           := $(VENV)/bin/pip
 
 # ── fake-internet config (must match config.toml [fakeinternet]) ──────────────
 DETONET_NAME       := detonet
@@ -24,7 +24,7 @@ install:
 	$(PIP) install pytest
 
 test:
-	$(VENV)/Scripts/pytest -v
+	$(VENV)/bin/pytest -v
 
 # ── sandbox image ─────────────────────────────────────────────────────────────
 sandbox-image:
@@ -50,7 +50,10 @@ fakeinternet-image:
 
 fakeinternet-start: detonet fakeinternet-image
 	@mkdir -p $(FAKEINTERNET_LOGS)
-	@docker inspect $(FAKEINTERNET_NAME) > /dev/null 2>&1 \
+	@# Remove any stale exited container so it never blocks a restart
+	@docker rm -f $(FAKEINTERNET_NAME) 2>/dev/null || true
+	@# Check specifically for a running container (not the image of the same name)
+	@docker ps -q -f name=^/$(FAKEINTERNET_NAME)$$ | grep -q . \
 	  && echo "Container '$(FAKEINTERNET_NAME)' is already running — skipping" \
 	  || docker run -d \
 	       --name    $(FAKEINTERNET_NAME) \
