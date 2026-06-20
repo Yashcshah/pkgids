@@ -4,8 +4,12 @@ reports_dir   = "reports"
 
 [sandbox]
 image        = "pkgids-sandbox:latest"
+runtime      = "runsc"
 timeout_secs = 120
 network      = "none"
+memory       = "1g"
+cpus         = 1.0
+pids_limit   = 256
 
 [scoring]
 malicious_threshold  = 0.8
