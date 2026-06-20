@@ -48,22 +48,33 @@ def test_stderr_captured():
 
 @requires_sandbox
 def test_workdir_mounted_readonly(tmp_path):
-    (tmp_path / "hello.txt").write_text("greetings")
-    result = run_in_sandbox(["cat", "/work/hello.txt"], workdir_host=tmp_path)
+    # Create an explicitly world-traversable dir so 'deton' can reach /work.
+    # pytest's tmp_path parents may be 0700 (root-only); a fresh subdir with
+    # explicit mode 0755 / 0644 ensures the bind-mount is accessible.
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o755)
+    hello = work_dir / "hello.txt"
+    hello.write_text("greetings")
+    hello.chmod(0o644)
+    result = run_in_sandbox(["cat", "/work/hello.txt"], workdir_host=work_dir)
     assert result["exit_code"] == 0
     assert "greetings" in result["stdout"]
 
 
 @requires_sandbox
 def test_workdir_is_readonly(tmp_path):
-    (tmp_path / "seed.txt").write_text("x")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(mode=0o755)
+    seed = work_dir / "seed.txt"
+    seed.write_text("x")
+    seed.chmod(0o644)
     result = run_in_sandbox(
         ["sh", "-c", "echo bad > /work/seed.txt"],
-        workdir_host=tmp_path,
+        workdir_host=work_dir,
     )
     # Write must fail; container exits non-zero and host file is untouched
     assert result["exit_code"] != 0
-    assert (tmp_path / "seed.txt").read_text() == "x"
+    assert seed.read_text() == "x"
 
 
 # ── scratch is writable ───────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 import uuid
@@ -10,6 +11,25 @@ from pathlib import Path
 from . import config as _cfg
 
 _SUPPORTED_NETWORKS = {"none", "default"}
+
+
+def _make_world_readable(path: Path) -> None:
+    """Ensure *path* and every item in its subtree are readable and traversable
+    by any UID.
+
+    Directories get at least r-x for group + other (0o055 OR'd in) so that
+    unprivileged users — including the container's 'deton' account — can enter
+    and list them.  Regular files get at least r for group + other (0o044).
+    This is called automatically on workdir_host before every bind-mount.
+    """
+    path.chmod(path.stat().st_mode | 0o555)
+    for root, dirs, files in os.walk(path):
+        for name in dirs:
+            p = Path(root) / name
+            p.chmod(p.stat().st_mode | 0o555)
+        for name in files:
+            p = Path(root) / name
+            p.chmod(p.stat().st_mode | 0o444)
 
 
 def _force_remove(name: str) -> None:
@@ -102,10 +122,11 @@ def run_in_sandbox(
     ]
 
     if workdir_host is not None:
-        src = str(Path(workdir_host).resolve())
+        wh = Path(workdir_host).resolve()
+        _make_world_readable(wh)
         docker_cmd += [
             "--mount",
-            f"type=bind,source={src},target=/work,readonly",
+            f"type=bind,source={wh},target=/work,readonly",
         ]
 
     docker_cmd += [image] + inner
