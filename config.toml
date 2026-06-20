@@ -11,6 +11,14 @@ memory       = "1g"
 cpus         = 1.0
 pids_limit   = 256
 
+[fakeinternet]
+network        = "detonet"
+subnet         = "10.200.200.0/24"
+container_name = "pkgids-fakeinternet"
+ip             = "10.200.200.2"
+image          = "pkgids-fakeinternet:latest"
+logs_dir       = "logs/fakeinternet"
+
 [scoring]
 malicious_threshold  = 0.8
 suspicious_threshold = 0.5
