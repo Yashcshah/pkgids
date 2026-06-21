@@ -198,6 +198,7 @@ def run(
     version: str,
     run_dir: Path | None = None,
     skip_import: bool | None = None,
+    artifact_path: Path | None = None,
 ) -> dict:
     """Full detonation pipeline for one package.
 
@@ -216,6 +217,12 @@ def run(
     The timestamp window [t_start, t_end] recorded around each sandbox call is
     the source of truth for network_activity.  IP recycling in detonet can never
     cause a false positive because stale entries pre-date t_start.
+
+    Parameters
+    ----------
+    artifact_path:
+        If provided, skip ``fetch()`` and use this pre-built local artifact
+        directly.  Useful for corpus validation where sdists are built locally.
     """
     cfg     = _cfg.get()
     det_cfg = cfg.get("detonation", {})
@@ -234,9 +241,15 @@ def run(
     if det_cfg.get("clear_logs_each_run", False):
         _clear_fakeinternet_logs(fi_logs_dir)
 
-    # ── 2. Fetch ──────────────────────────────────────────────────────────────
-    print(f"[detonate] fetching {ecosystem}:{name}=={version} ...", flush=True)
-    artifact = fetch(ecosystem, name, version)
+    # ── 2. Fetch (or use local artifact) ─────────────────────────────────────
+    if artifact_path is not None:
+        artifact = Path(artifact_path)
+        if not artifact.exists():
+            raise FileNotFoundError(f"local artifact not found: {artifact}")
+        print(f"[detonate] using local artifact: {artifact}", flush=True)
+    else:
+        print(f"[detonate] fetching {ecosystem}:{name}=={version} ...", flush=True)
+        artifact = fetch(ecosystem, name, version)
     artifact_dir = artifact.parent
 
     # ── 3. Run directory ──────────────────────────────────────────────────────

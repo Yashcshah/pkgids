@@ -9,3 +9,4 @@ logs/
 metadata.json
 data/malicious_*.json
 data/validation_results.json
+corpus/dist/

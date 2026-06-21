@@ -113,6 +113,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="Base directory for detonation run artifacts",
     )
+    validate_cmd.add_argument(
+        "--local-artifacts",
+        action="store_true",
+        default=False,
+        help=(
+            "Read artifact_path from the CSV and use the local file directly "
+            "instead of fetching from a package registry. "
+            "Required for corpus validation (data/corpus_samples.csv)."
+        ),
+    )
 
     return parser
 
@@ -232,7 +242,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        report = run_validation(samples_csv, results_path, runs_dir)
+        report = run_validation(
+            samples_csv, results_path, runs_dir,
+            local_artifacts=args.local_artifacts,
+        )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
