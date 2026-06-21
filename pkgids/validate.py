@@ -93,6 +93,7 @@ def run_validation(
     samples_csv: Path,
     results_path: Path = _DEFAULT_RESULTS,
     runs_base_dir: Path | None = None,
+    local_artifacts: bool = False,
 ) -> dict:
     """Run the validation pipeline against all rows in *samples_csv*.
 
@@ -102,15 +103,16 @@ def run_validation(
     Parameters
     ----------
     samples_csv:
-        CSV with columns: ecosystem, name, version, expected_label.
+        CSV with columns: ecosystem, name, version, expected_label
+        [, technique, artifact_path].
     results_path:
-        JSONL results file; created (or appended to) as each sample completes.
+        Results file; created (or appended to) as each sample completes.
     runs_base_dir:
         Override for the detonation run directory.  None → auto-generated.
-
-    Returns
-    -------
-    A report dict produced by :func:`compute_report`.
+    local_artifacts:
+        When True, read ``artifact_path`` from the CSV and pass it directly
+        to the detonation pipeline instead of fetching from a registry.
+        Use this for the self-built corpus (``data/corpus_samples.csv``).
     """
     results = _load_results(results_path)
 
@@ -148,39 +150,73 @@ def run_validation(
             "run_dir":   None,
         }
 
-        # ── 1. Availability check ─────────────────────────────────────────────
-        # HTTPError (4xx) or ValueError (npm version not found) → removed from registry
-        try:
-            _artifact_fetch(ecosystem, name, version or "")
-        except (requests.HTTPError, ValueError):
-            print(f"[validate]   unavailable — skipping", flush=True)
-            record["outcome"] = "unavailable"
-            results[key] = record
-            _save_results(results_path, results)
-            continue
-        except Exception as exc:
-            print(f"[validate]   fetch error: {exc}", flush=True)
-            record["outcome"] = "error"
-            record["error"]   = str(exc)
-            results[key] = record
-            _save_results(results_path, results)
-            continue
+        if local_artifacts:
+            # ── Local-artifact mode: skip registry fetch ──────────────────────
+            artifact_str = sample.get("artifact_path", "").strip()
+            if not artifact_str:
+                print("[validate]   artifact_path missing in CSV — skipping", flush=True)
+                record["outcome"] = "error"
+                record["error"]   = "artifact_path column missing or empty"
+                results[key] = record
+                _save_results(results_path, results)
+                continue
 
-        # ── 2. Detonation ─────────────────────────────────────────────────────
-        # capture.run() re-fetches internally (artifact is already local)
-        try:
-            summary = _detonate(
-                ecosystem, name, version or "",
-                run_dir=runs_base_dir,
-                skip_import=False,
-            )
-            record["predicted"] = predict(summary)
-            record["outcome"]   = "completed"
-            record["run_dir"]   = summary.get("run_dir")
-        except Exception as exc:
-            print(f"[validate]   detonation error: {exc}", flush=True)
-            record["outcome"] = "error"
-            record["error"]   = str(exc)
+            local_path = Path(artifact_str)
+            if not local_path.exists():
+                print(f"[validate]   artifact not found: {local_path}", flush=True)
+                record["outcome"] = "unavailable"
+                results[key] = record
+                _save_results(results_path, results)
+                continue
+
+            try:
+                summary = _detonate(
+                    ecosystem, name, version or "1.0.0",
+                    run_dir=runs_base_dir,
+                    skip_import=False,
+                    artifact_path=local_path,
+                )
+                record["predicted"] = predict(summary)
+                record["outcome"]   = "completed"
+                record["run_dir"]   = summary.get("run_dir")
+            except Exception as exc:
+                print(f"[validate]   detonation error: {exc}", flush=True)
+                record["outcome"] = "error"
+                record["error"]   = str(exc)
+
+        else:
+            # ── Registry mode: fetch then detonate ────────────────────────────
+            # HTTPError (4xx) or ValueError (npm version not found) → unavailable
+            try:
+                _artifact_fetch(ecosystem, name, version or "")
+            except (requests.HTTPError, ValueError):
+                print("[validate]   unavailable — skipping", flush=True)
+                record["outcome"] = "unavailable"
+                results[key] = record
+                _save_results(results_path, results)
+                continue
+            except Exception as exc:
+                print(f"[validate]   fetch error: {exc}", flush=True)
+                record["outcome"] = "error"
+                record["error"]   = str(exc)
+                results[key] = record
+                _save_results(results_path, results)
+                continue
+
+            # capture.run() re-fetches internally (artifact is already local)
+            try:
+                summary = _detonate(
+                    ecosystem, name, version or "",
+                    run_dir=runs_base_dir,
+                    skip_import=False,
+                )
+                record["predicted"] = predict(summary)
+                record["outcome"]   = "completed"
+                record["run_dir"]   = summary.get("run_dir")
+            except Exception as exc:
+                print(f"[validate]   detonation error: {exc}", flush=True)
+                record["outcome"] = "error"
+                record["error"]   = str(exc)
 
         results[key] = record
         _save_results(results_path, results)

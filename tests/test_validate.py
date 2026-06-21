@@ -404,3 +404,217 @@ def test_validate_benign_samples_no_false_positives(tmp_path):
     )
     # All available samples should be true negatives
     assert report["tn"] == report["available"]
+
+
+# ── local-artifacts mode unit tests (no Docker) ──────────────────────────────
+
+def _write_corpus_csv(path: Path, rows: list[dict]) -> None:
+    fieldnames = ["ecosystem", "name", "version", "expected_label",
+                  "technique", "artifact_path"]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+class TestLocalArtifacts:
+    def test_local_artifact_used_instead_of_fetch(self, tmp_path):
+        """--local-artifacts must pass artifact_path to _detonate, not call _artifact_fetch."""
+        artifact = tmp_path / "canary-http-install-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake sdist")
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "canary-http-install", "version": "1.0.0",
+            "expected_label": "malicious", "technique": "http-install",
+            "artifact_path": str(artifact),
+        }])
+
+        with (
+            patch("pkgids.validate._artifact_fetch") as mock_fetch,
+            patch("pkgids.validate._detonate",
+                  return_value=_fake_run_summary(install_net=True)) as mock_det,
+        ):
+            report = run_validation(csv_path, results_path, local_artifacts=True)
+
+        mock_fetch.assert_not_called()
+        # _detonate must have been called with the local artifact path
+        call_kwargs = mock_det.call_args.kwargs
+        assert call_kwargs.get("artifact_path") == artifact
+
+    def test_local_artifact_missing_gives_unavailable(self, tmp_path):
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "canary-http-install", "version": "1.0.0",
+            "expected_label": "malicious", "technique": "http-install",
+            "artifact_path": str(tmp_path / "nonexistent.tar.gz"),
+        }])
+
+        report = run_validation(csv_path, results_path, local_artifacts=True)
+        assert report["unavailable"] == 1
+        assert report["available"] == 0
+
+    def test_local_artifact_empty_path_gives_error(self, tmp_path):
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "canary-http-install", "version": "1.0.0",
+            "expected_label": "malicious", "technique": "http-install",
+            "artifact_path": "",  # empty
+        }])
+
+        report = run_validation(csv_path, results_path, local_artifacts=True)
+        assert report["errors"] == 1
+
+    def test_local_artifact_malicious_predicted_correctly(self, tmp_path):
+        artifact = tmp_path / "evil-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake")
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "evil", "version": "1.0.0",
+            "expected_label": "malicious", "technique": "http-install",
+            "artifact_path": str(artifact),
+        }])
+
+        with patch("pkgids.validate._detonate",
+                   return_value=_fake_run_summary(install_net=True)):
+            report = run_validation(csv_path, results_path, local_artifacts=True)
+
+        assert report["tp"] == 1
+        assert report["fn"] == 0
+
+    def test_local_artifact_benign_predicted_correctly(self, tmp_path):
+        artifact = tmp_path / "clean-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake")
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "clean", "version": "1.0.0",
+            "expected_label": "benign", "technique": "none",
+            "artifact_path": str(artifact),
+        }])
+
+        with patch("pkgids.validate._detonate",
+                   return_value=_fake_run_summary(install_net=False)):
+            report = run_validation(csv_path, results_path, local_artifacts=True)
+
+        assert report["tn"] == 1
+        assert report["fp"] == 0
+
+    def test_import_callback_known_false_negative(self, tmp_path):
+        """canary-import-callback is a known FN in the two-container pipeline."""
+        artifact = tmp_path / "canary-import-callback-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake")
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "canary-import-callback", "version": "1.0.0",
+            "expected_label": "malicious", "technique": "import-callback",
+            "artifact_path": str(artifact),
+        }])
+
+        # Simulates: install succeeds (no network), import fails (package not installed)
+        with patch("pkgids.validate._detonate",
+                   return_value=_fake_run_summary(install_net=False, import_net=False)):
+            report = run_validation(csv_path, results_path, local_artifacts=True)
+
+        # This is the known gap: import-callback evades two-container detection
+        assert report["fn"] == 1
+        assert "canary-import-callback" in report["false_negatives"]
+
+    def test_csv_with_extra_technique_column_parsed(self, tmp_path):
+        """Corpus CSV has extra columns (technique, artifact_path) — must parse OK."""
+        artifact = tmp_path / "pkg-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake")
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "pkg", "version": "1.0.0",
+            "expected_label": "benign", "technique": "none",
+            "artifact_path": str(artifact),
+        }])
+
+        with patch("pkgids.validate._detonate",
+                   return_value=_fake_run_summary()):
+            report = run_validation(csv_path, results_path, local_artifacts=True)
+
+        assert report["total"] == 1
+        assert report["available"] == 1
+
+
+class TestCLILocalArtifacts:
+    def test_local_artifacts_flag_passed_to_run_validation(self, tmp_path):
+        artifact = tmp_path / "canary-http-install-1.0.0.tar.gz"
+        artifact.write_bytes(b"fake")
+        csv_path     = tmp_path / "corpus.csv"
+        results_path = tmp_path / "results.json"
+
+        _write_corpus_csv(csv_path, [{
+            "ecosystem": "pypi", "name": "canary-http-install", "version": "1.0.0",
+            "expected_label": "malicious", "technique": "http-install",
+            "artifact_path": str(artifact),
+        }])
+
+        with (
+            patch("pkgids.validate._artifact_fetch") as mock_fetch,
+            patch("pkgids.validate._detonate",
+                  return_value=_fake_run_summary(install_net=True)),
+        ):
+            from pkgids.cli import main
+            code = main([
+                "validate",
+                "--samples", str(csv_path),
+                "--results", str(results_path),
+                "--local-artifacts",
+            ])
+
+        assert code == 0
+        mock_fetch.assert_not_called()
+
+
+# ── real corpus test (requires Docker + sandbox image + fakeinternet) ─────────
+
+@requires_sandbox
+def test_corpus_detection_rate(tmp_path):
+    """Run the self-built corpus through the full pipeline on the box.
+
+    Expected outcomes:
+    - canary-http-install:    TP  (HTTP callback detected)
+    - canary-dns-exfil:       TP  (DNS query detected)
+    - canary-env-harvest:     TP  (HTTP callback detected)
+    - canary-subprocess:      TP  (subprocess → python3 HTTP callback detected)
+    - canary-base64-blob:     TP  (exec'd HTTP callback detected)
+    - canary-import-callback: FN  (known gap: import-only callback evades pipeline)
+    - benign-clean-control:   TN
+
+    Minimum acceptable detection rate: 5/6 (all except the known FN).
+    """
+    corpus_csv = Path(__file__).parent.parent / "data" / "corpus_samples.csv"
+    if not corpus_csv.exists():
+        pytest.skip("corpus_samples.csv not found — run 'bash corpus/build_all.sh' first")
+
+    results_path = tmp_path / "corpus_results.json"
+    report = run_validation(
+        corpus_csv, results_path,
+        local_artifacts=True,
+    )
+
+    # Benign control must not be a false positive
+    assert report["fp"] == 0, f"False positives: {report['false_positives']}"
+
+    # At least 4 of the 5 install-phase techniques must be detected
+    # (canary-import-callback is a known FN)
+    install_tps = report["tp"]
+    assert install_tps >= 4, (
+        f"Too few TPs: {install_tps}. "
+        f"False negatives: {report['false_negatives']}"
+    )
