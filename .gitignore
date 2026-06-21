@@ -1,7 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
 artifacts/
 runs/
+logs/
 *.pcap
 metadata.json
+data/malicious_*.json
+data/validation_results.json

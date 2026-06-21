@@ -1,0 +1,11 @@
+ecosystem,name,version,expected_label
+pypi,six,1.16.0,benign
+pypi,requests,2.31.0,benign
+pypi,urllib3,2.0.7,benign
+pypi,certifi,2024.2.2,benign
+pypi,packaging,23.2,benign
+npm,left-pad,1.3.0,benign
+npm,lodash,4.17.21,benign
+npm,chalk,4.1.2,benign
+npm,ms,2.1.3,benign
+npm,debug,4.3.4,benign
