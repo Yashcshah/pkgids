@@ -4,8 +4,37 @@ import subprocess
 
 import pytest
 
-from pkgids.sandbox import _container_exists, run_in_sandbox
+from pkgids.sandbox import _container_exists, _write_resolv_conf, run_in_sandbox
 from tests.conftest import requires_sandbox
+
+
+# ── _write_resolv_conf unit tests (no Docker needed) ─────────────────────────
+
+def test_write_resolv_conf_content(tmp_path):
+    p = _write_resolv_conf("10.200.200.2")
+    try:
+        assert p.read_text() == "nameserver 10.200.200.2\n"
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_write_resolv_conf_world_readable(tmp_path):
+    import stat
+    p = _write_resolv_conf("10.200.200.2")
+    try:
+        mode = p.stat().st_mode
+        assert mode & stat.S_IROTH, "resolv.conf must be world-readable"
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_write_resolv_conf_different_ips():
+    for ip in ("1.2.3.4", "10.200.200.2", "192.168.1.1"):
+        p = _write_resolv_conf(ip)
+        try:
+            assert f"nameserver {ip}" in p.read_text()
+        finally:
+            p.unlink(missing_ok=True)
 
 
 # ── basic execution ───────────────────────────────────────────────────────────
@@ -123,6 +152,64 @@ def test_success_container_removed_afterward():
     assert result["timed_out"] is False
     name = result["container_name"]
     assert not _container_exists(name), f"container {name!r} still present after success"
+
+
+# ── fake-network DNS resolution (requires fakeinternet appliance) ─────────────
+
+@requires_sandbox
+def test_fake_network_dns_resolves_to_appliance():
+    """DNS inside the gVisor sandbox must reach the fake-internet appliance.
+
+    The appliance resolves every hostname to its own IP (10.200.200.2 by
+    default).  We ask the Python socket API to resolve a canary hostname and
+    assert the returned IP matches the configured appliance IP.
+    """
+    from pkgids import config as _cfg
+    fi_ip = _cfg.get().get("fakeinternet", {}).get("ip", "10.200.200.2")
+
+    result = run_in_sandbox(
+        ["python3", "-c",
+         "import socket; print(socket.gethostbyname('canary-test.example.com'))"],
+        network="fake",
+    )
+    assert result["exit_code"] == 0, (
+        f"DNS lookup failed (exit {result['exit_code']}):\n"
+        f"stdout: {result['stdout']}\nstderr: {result['stderr']}"
+    )
+    assert fi_ip in result["stdout"], (
+        f"Expected appliance IP {fi_ip!r} in stdout, got: {result['stdout']!r}"
+    )
+
+
+@requires_sandbox
+def test_fake_network_dns_appears_in_capture_log():
+    """DNS query must produce a log entry in the fakeinternet capture file."""
+    import json, time
+    from pathlib import Path
+    from pkgids.capture import _read_window
+
+    result = run_in_sandbox(
+        ["python3", "-c",
+         "import socket; socket.gethostbyname('canary-log.example.com')"],
+        network="fake",
+    )
+    assert result["exit_code"] == 0
+
+    capture_log = result.get("capture_log")
+    assert capture_log is not None, "capture_log should be set in fake mode"
+
+    # Give the appliance a moment to flush the log entry
+    time.sleep(0.5)
+
+    # Use a generous window: the run itself tells us the exact window but here
+    # we just want to confirm the entry landed at all.
+    entries = _read_window(Path(capture_log), time.time() - 30, time.time())
+    dns_entries = [e for e in entries if e.get("type") == "dns"
+                   and "canary-log" in e.get("query", "")]
+    assert dns_entries, (
+        f"No DNS entry for canary-log.example.com in {capture_log}.\n"
+        f"All recent entries: {entries}"
+    )
 
 
 # ── input validation ──────────────────────────────────────────────────────────

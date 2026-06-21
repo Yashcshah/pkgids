@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -63,6 +64,24 @@ def _container_running(name: str) -> bool:
         timeout=10,
     )
     return r.stdout.strip() == "true"
+
+
+def _write_resolv_conf(nameserver_ip: str) -> Path:
+    """Write a minimal /etc/resolv.conf pointing at *nameserver_ip*.
+
+    Under gVisor (runsc), Docker's embedded resolver at 127.0.0.11 is not
+    functional.  Bind-mounting this file over /etc/resolv.conf bypasses
+    Docker's resolver injection entirely and routes DNS straight to the
+    fake-internet appliance.
+    """
+    fd, path_str = tempfile.mkstemp(prefix="pkgids-resolv-", suffix=".conf")
+    try:
+        os.write(fd, f"nameserver {nameserver_ip}\n".encode())
+    finally:
+        os.close(fd)
+    p = Path(path_str)
+    p.chmod(0o644)   # world-readable so the container's non-root user can read it
+    return p
 
 
 def _container_ip_on_network(container: str, network: str) -> str | None:
@@ -162,6 +181,14 @@ def run_in_sandbox(
     # in the finally block (before _force_remove wipes it).
     use_auto_remove = (network != "fake")
 
+    # Under gVisor (runsc), Docker's embedded resolver at 127.0.0.11 is
+    # non-functional, so --dns alone does not work.  Writing a minimal
+    # resolv.conf and bind-mounting it over /etc/resolv.conf bypasses Docker's
+    # resolver injection entirely and routes DNS straight to the appliance.
+    resolv_conf_path: Path | None = None
+    if network == "fake":
+        resolv_conf_path = _write_resolv_conf(fi_ip)
+
     docker_cmd: list[str] = ["docker", "run"]
     if use_auto_remove:
         docker_cmd.append("--rm")
@@ -177,7 +204,10 @@ def run_in_sandbox(
     ]
 
     if network == "fake":
-        docker_cmd += ["--dns", fi_ip]
+        docker_cmd += [
+            "--dns",    fi_ip,   # belt-and-suspenders; resolv.conf mount is the real fix
+            "--mount",  f"type=bind,source={resolv_conf_path},target=/etc/resolv.conf,readonly",
+        ]
 
     if workdir_host is not None:
         wh = Path(workdir_host).resolve()
@@ -227,6 +257,8 @@ def run_in_sandbox(
         timed_out = True
     finally:
         _force_remove(container_name)
+        if resolv_conf_path is not None:
+            resolv_conf_path.unlink(missing_ok=True)
 
     return {
         "stdout":           stdout_b.decode(errors="replace"),
