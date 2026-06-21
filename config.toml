@@ -20,8 +20,9 @@ image          = "pkgids-fakeinternet:latest"
 logs_dir       = "logs/fakeinternet"
 
 [detonation]
-runs_dir    = "runs"
-skip_import = false
+runs_dir             = "runs"
+skip_import          = false
+clear_logs_each_run  = true
 
 [scoring]
 malicious_threshold  = 0.8
