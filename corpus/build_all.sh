@@ -34,18 +34,29 @@ build_sdist() {
 
     echo "[build_all] building $name ..."
 
-    # Run in a subshell so cd doesn't affect our cwd
+    # Snapshot existing tarballs BEFORE the build so we can identify the new one.
+    # This is robust against setuptools normalising hyphens to underscores
+    # (e.g. "canary-http-install" → "canary_http_install-1.0.0.tar.gz").
+    local before
+    before="$(ls -1 "$DIST_DIR"/*.tar.gz 2>/dev/null | sort || true)"
+
+    # Build in a subshell so the cd does not affect our working directory.
     (
         cd "$pkg_dir"
         python3 -W ignore::DeprecationWarning \
-            -W ignore::UserWarning \
-            setup.py sdist --dist-dir "$DIST_DIR" -q 2>&1 \
-            | grep -vE "^(running|creating|hard linking|copying|Writing)" || true
+                -W ignore::UserWarning \
+                setup.py sdist --dist-dir "$DIST_DIR" -q 2>&1 \
+            | grep -vE "^(running|creating|hard linking|copying|Writing)" \
+            || true
     )
 
-    local artifact="$DIST_DIR/${name}-${version}.tar.gz"
-    if [[ ! -f "$artifact" ]]; then
-        echo "[build_all]   WARNING: artifact not found at $artifact — skipping"
+    # Find the tarball that appeared after the build.
+    local after artifact
+    after="$(ls -1 "$DIST_DIR"/*.tar.gz 2>/dev/null | sort || true)"
+    artifact="$(comm -13 <(echo "$before") <(echo "$after") | head -1)"
+
+    if [[ -z "$artifact" ]]; then
+        echo "[build_all]   WARNING: no new .tar.gz found in $DIST_DIR — skipping $name"
         return
     fi
 
@@ -54,7 +65,7 @@ build_sdist() {
     echo "[build_all]   -> $artifact"
 }
 
-# ── malicious samples ──────────────────────────────────────────────────────────
+# ── malicious samples ─────────────────────────────────────────────────────────
 build_sdist "$SCRIPT_DIR/canary-http-install"    "canary-http-install"    malicious "http-install"
 build_sdist "$SCRIPT_DIR/canary-dns-exfil"       "canary-dns-exfil"       malicious "dns-exfil"
 build_sdist "$SCRIPT_DIR/canary-env-harvest"     "canary-env-harvest"     malicious "env-harvest"
@@ -62,13 +73,20 @@ build_sdist "$SCRIPT_DIR/canary-subprocess"      "canary-subprocess"      malici
 build_sdist "$SCRIPT_DIR/canary-base64-blob"     "canary-base64-blob"     malicious "base64-obfuscation"
 build_sdist "$SCRIPT_DIR/canary-import-callback" "canary-import-callback" malicious "import-callback"
 
-# ── benign control ─────────────────────────────────────────────────────────────
+# ── benign control ────────────────────────────────────────────────────────────
 build_sdist "$SCRIPT_DIR/benign-clean-control"   "benign-clean-control"   benign    "none"
 
+# ── verify ────────────────────────────────────────────────────────────────────
 echo ""
-echo "[build_all] done."
+ROW_COUNT=$(tail -n +2 "$CSV_PATH" | grep -c . || true)
+echo "[build_all] done — $ROW_COUNT artifact(s) in CSV."
 echo "[build_all] CSV written to : $CSV_PATH"
 echo "[build_all] Artifacts in   : $DIST_DIR/"
 echo ""
+
+if [[ "$ROW_COUNT" -lt 7 ]]; then
+    echo "[build_all] WARNING: expected 7 rows, got $ROW_COUNT. Check errors above."
+fi
+
 echo "Run the validation harness with:"
 echo "  pkgids validate --samples data/corpus_samples.csv --local-artifacts"
