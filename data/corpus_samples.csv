@@ -1,0 +1,8 @@
+ecosystem,name,version,expected_label,technique,artifact_path
+pypi,canary-http-install,1.0.0,malicious,http-install,/root/pkgids/corpus/dist/canary_http_install-1.0.0.tar.gz
+pypi,canary-dns-exfil,1.0.0,malicious,dns-exfil,/root/pkgids/corpus/dist/canary_dns_exfil-1.0.0.tar.gz
+pypi,canary-env-harvest,1.0.0,malicious,env-harvest,/root/pkgids/corpus/dist/canary_env_harvest-1.0.0.tar.gz
+pypi,canary-subprocess,1.0.0,malicious,subprocess-spawn,/root/pkgids/corpus/dist/canary_subprocess-1.0.0.tar.gz
+pypi,canary-base64-blob,1.0.0,malicious,base64-obfuscation,/root/pkgids/corpus/dist/canary_base64_blob-1.0.0.tar.gz
+pypi,canary-import-callback,1.0.0,malicious,import-callback,/root/pkgids/corpus/dist/canary_import_callback-1.0.0.tar.gz
+pypi,benign-clean-control,1.0.0,benign,none,/root/pkgids/corpus/dist/benign_clean_control-1.0.0.tar.gz
