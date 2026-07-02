@@ -125,23 +125,35 @@ def _parse_strace_line(line: str) -> dict | None:
 # package under test, and must never be flagged as suspicious.
 _PKGIDS_IMPORT_PREFIX = "import sys; sys.path.insert(0, '/scratch/site-packages')"
 
+# Path fragment that identifies pip's PEP 517 build-hook runner.  pip spawns
+# this as a subprocess to call build-backend hooks (prepare_metadata_for_build_wheel,
+# build_wheel, etc.) for packages that use pyproject.toml.
+_PIP_HOOK_RUNNER = "pyproject_hooks/_in_process/_in_process.py"
+
 
 def _is_framework_exec(argv: list[str]) -> bool:
-    """Return True when argv belongs to pkgids itself or pip3 internals.
+    """Return True when argv belongs to pkgids itself or pip internals.
 
-    Two cases are excluded:
+    Three cases are excluded:
     1. pkgids' own import command — always starts with the site-packages path
        insert that pkgids injects; no malware would use this exact preamble.
     2. Interpreter -c calls whose code argument was truncated by strace — strace
-       truncates strings longer than its -s limit (default 32 chars), so pip3's
+       truncates strings longer than its -s limit (default 32 chars), so pip's
        long internal python3 -c invocations appear as argv ending at '-c' with
        no following code visible.  Short malicious payloads are never truncated
        and remain detectable; this exclusion only affects already-invisible code.
+    3. pip's PEP 517 build-hook runner — pip spawns python3 with its vendored
+       _in_process.py script to call build-backend hooks (prepare_metadata_for_build_wheel,
+       build_wheel) for pyproject.toml packages.  The script path is pip-internal
+       and no malware would reference it.
     """
     if any(_PKGIDS_IMPORT_PREFIX in a for a in argv):
         return True
     # argv[-1] == "-c" means the code argument was truncated away by strace.
     if argv and argv[-1] == "-c":
+        return True
+    # pip's PEP 517 hook runner is always argv[1] when present.
+    if len(argv) >= 2 and _PIP_HOOK_RUNNER in argv[1]:
         return True
     return False
 
