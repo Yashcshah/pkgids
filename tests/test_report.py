@@ -191,10 +191,12 @@ class TestBuildReport:
 
     def test_clean_package_no_malicious_behavior(self):
         rep = build_report(self._clean_norm())
-        assert rep["verdict"]         == "no_malicious_behavior_observed"
-        assert rep["dynamic_verdict"] == "no_malicious_behavior_observed"
-        assert rep["verdict_basis"]   == "dynamic"
-        assert rep["score"]           == 0
+        assert rep["verdict"]             == "no_malicious_behavior_observed"
+        assert rep["final_verdict"]       == "no_malicious_behavior_observed"
+        assert rep["behavioral_verdict"]  == "no_malicious_behavior_observed"
+        assert rep["advisory_status"]     == "none"
+        assert rep["verdict_basis"]       == "dynamic"
+        assert rep["score"]               == 0
 
     def test_clean_package_confidence_zero(self):
         rep = build_report(self._clean_norm())
@@ -353,9 +355,35 @@ class TestBuildReport:
         assert rep["verdict"]       == "known_vulnerable"
         assert rep["verdict_basis"] == "advisory"
 
-    def test_advisory_hit_dynamic_verdict_preserved(self):
+    def test_advisory_hit_behavioral_verdict_preserved(self):
         rep = build_report(self._advisory_norm(self._hit_advisory()))
-        assert rep["dynamic_verdict"] == "no_malicious_behavior_observed"
+        assert rep["behavioral_verdict"] == "no_malicious_behavior_observed"
+
+    def test_advisory_hit_gives_advisory_status(self):
+        rep = build_report(self._advisory_norm(self._hit_advisory()))
+        assert rep["advisory_status"] == "advisory_hit"
+
+    def test_advisory_error_gives_lookup_failed_status(self):
+        error_adv = {
+            "advisory_hit": False, "advisory_source": None,
+            "advisory_count": 0, "advisory_ids": [], "advisory_summaries": [],
+            "advisory_error": "OSV query timed out",
+        }
+        rep = build_report(self._advisory_norm(error_adv))
+        assert rep["advisory_status"] == "lookup_failed"
+
+    def test_no_advisory_gives_none_status(self):
+        no_hit = {
+            "advisory_hit": False, "advisory_source": "osv",
+            "advisory_count": 0, "advisory_ids": [], "advisory_summaries": [],
+            "advisory_error": None,
+        }
+        rep = build_report(self._advisory_norm(no_hit))
+        assert rep["advisory_status"] == "none"
+
+    def test_final_verdict_matches_verdict(self):
+        rep = build_report(self._advisory_norm(self._hit_advisory()))
+        assert rep["final_verdict"] == rep["verdict"]
 
     def test_advisory_field_in_report(self):
         rep = build_report(self._advisory_norm(self._hit_advisory()))
@@ -406,10 +434,12 @@ class TestBuildHtmlReport:
             "package":       {"ecosystem": "pypi", "name": "mypkg", "version": "1.0.0"},
             "_run":          {"ecosystem": "pypi", "name": "mypkg", "version": "1.0.0",
                               "run_dir": ""},
-            "verdict":         "no_malicious_behavior_observed",
-            "dynamic_verdict": "no_malicious_behavior_observed",
-            "verdict_basis":   "dynamic",
-            "advisory":        {},
+            "verdict":            "no_malicious_behavior_observed",
+            "final_verdict":      "no_malicious_behavior_observed",
+            "behavioral_verdict": "no_malicious_behavior_observed",
+            "advisory_status":    "none",
+            "verdict_basis":      "dynamic",
+            "advisory":           {},
             "score":           0,
             "confidence":    0.0,
             "attack_tactics": [],
