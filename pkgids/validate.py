@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+
 import json
 from pathlib import Path
 from typing import Literal
@@ -20,21 +21,52 @@ _DEFAULT_RESULTS = Path(__file__).parent.parent / "data" / "validation_results.j
 def predict(run_summary: dict) -> Literal["malicious", "benign"]:
     """Predict a label from a ``capture.run()`` summary dict.
 
-    Rules (applied in order):
+    Rules (applied in order)
+    ------------------------
     1. Any phase with ``network_activity=True`` → malicious.
-    2. Install phase timed out (likely hung on a C2 call) → malicious.
-    3. Otherwise → benign.
+    2. Install or import phase timed out → malicious (C2 call during install/import
+       causes a hang; the sandbox kills it, revealing the intent).
+    3. Install or import phase crashed (container killed by OOM or signal) → malicious.
+    4. Install or import phase spawned a suspicious process (curl, wget, nc, bash -c,
+       etc. as detected by strace execve tracing) → malicious.
+    5. Otherwise → benign.
+
+    ``module_not_found`` is NOT treated as malicious — it indicates a name
+    mismatch (package installs under a different top-level name) rather than
+    bad intent.  The network_activity rule still fires if the package phoned
+    home before the import failed.
+
+    ``telemetry_limited_process=True`` on a phase means strace was unavailable;
+    ``any_suspicious=False`` may be a false negative in that case.
     """
     na = run_summary.get("network_activity", {})
     if any(v is True for v in na.values()):
         return "malicious"
 
-    phases  = run_summary.get("phases", {})
-    install = phases.get("install", {})
-    if isinstance(install, dict) and install.get("timed_out"):
-        return "malicious"
+    phases = run_summary.get("phases", {})
+    for phase_name in ("install", "import"):
+        p = phases.get(phase_name, {})
+        if not isinstance(p, dict):
+            continue
+        # Legacy field check (timed_out) kept for backwards compat with old run.jsons.
+        if p.get("timed_out") or p.get("status") in ("timed_out", "crashed"):
+            return "malicious"
+        pa = p.get("process_activity") or {}
+        if pa.get("any_suspicious"):
+            return "malicious"
 
     return "benign"
+
+
+def predict_from_report(report_dict: dict) -> str:
+    """Derive a verdict from a structured report dict (``report.build_report()`` output).
+
+    Uses the additive score-based verdict (4-tier) instead of the heuristic
+    ``predict()`` rules.  Return value is one of:
+    "malicious", "likely_malicious", "suspicious", "benign".
+    """
+    from .score import verdict as _verdict
+    return _verdict(int(report_dict.get("score", 0)))
 
 
 def compute_report(results: list[dict]) -> dict:

@@ -20,13 +20,52 @@ image          = "pkgids-fakeinternet:latest"
 logs_dir       = "logs/fakeinternet"
 
 [detonation]
-runs_dir             = "runs"
-skip_import          = false
-clear_logs_each_run  = true
+runs_dir                       = "runs"
+skip_import                    = false
+clear_logs_each_run            = true
+post_install_idle_secs         = 2
+post_import_idle_secs          = 2
+skip_import_on_install_failure = false
+
+[telemetry]
+enabled              = true
+backend              = "strace"
+trace_syscalls       = [
+    "execve", "execveat",
+    "open", "openat", "unlink", "rename", "mkdir",
+    "chmod", "chown",
+    "connect", "socket",
+    "kill", "ptrace",
+]
+capture_sensitive_only = false
+max_arg_len            = 512
+
+[diffing]
+enabled        = true
+# Baseline mode when from_version is auto-resolved:
+#   previous_version        — the version tested just before the candidate (run_ts order)
+#   previous_known_good     — latest version with prediction=benign and no suspicious flags
+#   rolling_benign_baseline — feature envelope across the N most recent benign versions
+baseline_mode  = "previous_known_good"
+rolling_window = 5
+store_profiles = true
+profile_store  = "supabase"
+
+[reporting]
+enabled           = true
+json              = true
+html              = true
+include_pcap_link = true
+attack_mapping    = "tactic_level"
 
 [scoring]
-malicious_threshold  = 0.8
-suspicious_threshold = 0.5
+enabled = true
+scale   = "0-100"
+
+[scoring.verdict_thresholds]
+benign           = 24
+suspicious       = 49
+likely_malicious = 74
 
 [logging]
 level = "INFO"
