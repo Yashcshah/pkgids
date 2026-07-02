@@ -21,7 +21,21 @@ from __future__ import annotations
 
 import html as _html
 import json
+import shutil
 from pathlib import Path
+
+# Files copied into every portable export bundle (order preserved in HTML).
+_ARTIFACT_NAMES = (
+    "run.json",
+    "metadata.json",
+    "network.jsonl",
+    "telemetry.jsonl",
+    "behavior_profile.json",
+    "diff.json",
+    "correlations.json",
+    "report.json",
+    "capture.pcap",
+)
 
 
 # ── JSONL reader ──────────────────────────────────────────────────────────────
@@ -492,7 +506,11 @@ _TACTIC_ID: dict[str, str] = {
 }
 
 
-def build_html_report(report_dict: dict) -> str:  # noqa: C901
+def build_html_report(  # noqa: C901
+    report_dict: dict,
+    *,
+    artifact_prefix: str | None = None,
+) -> str:
     """Render a structured report as a self-contained HTML page.
 
     Sections are ordered around the six analyst questions:
@@ -868,13 +886,14 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
     run_dir_str    = run_detail.get("run_dir", "")
     artifact_links = ""
     if run_dir_str:
-        for fname in (
-            "run.json", "metadata.json", "network.jsonl", "telemetry.jsonl",
-            "behavior_profile.json", "diff.json", "correlations.json",
-            "report.json", "capture.pcap",
-        ):
-            fpath = Path(run_dir_str).resolve() / fname
-            href  = fpath.as_uri()
+        for fname in _ARTIFACT_NAMES:
+            fpath  = Path(run_dir_str).resolve() / fname
+            # Portable exports pass a relative prefix; otherwise fall back to
+            # an absolute file:// URI (server-local only).
+            if artifact_prefix is not None:
+                href = f"{artifact_prefix}{fname}"
+            else:
+                href = fpath.as_uri()
             if fpath.exists():
                 artifact_links += (
                     f'<li>{_file_ico}<a href="{e(href)}">{e(fname)}</a></li>\n'
@@ -883,7 +902,7 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
                 artifact_links += (
                     f'<li class="empty-art">{_file_ico}'
                     f'<a href="{e(href)}">{e(fname)}</a>'
-                    f'<span class="badge">empty</span></li>\n'
+                    f'<span class="badge">missing</span></li>\n'
                 )
 
     # ── metadata ───────────────────────────────────────────────────────────────
@@ -1311,6 +1330,70 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
 </div>
 </body>
 </html>"""
+
+
+# ── portable export bundle ────────────────────────────────────────────────────
+
+def export_bundle(
+    run_dir: str | Path,
+    report_dict: dict,
+    *,
+    export_root: str | Path | None = None,
+) -> Path:
+    """Copy run artifacts into a self-contained, portable export directory.
+
+    Layout::
+
+        <export_root>/<run-id>/
+            report.html        ← portable HTML (relative artifact links)
+            report.json        ← public report fields
+            artifacts/
+                run.json
+                telemetry.jsonl
+                … (all files that exist in run_dir)
+
+    Parameters
+    ----------
+    run_dir:
+        The run directory produced by ``capture.run()``.
+    report_dict:
+        Pre-built report dict from ``build_report()`` / ``report()``.
+    export_root:
+        Parent directory for the bundle.  Defaults to
+        ``<run_dir>/../../exports/`` (i.e. a sibling of ``runs/``).
+
+    Returns
+    -------
+    Path
+        The bundle directory that was created / updated.
+    """
+    run_dir  = Path(run_dir).resolve()
+    run_id   = run_dir.name
+    if export_root is None:
+        export_root = run_dir.parent.parent / "exports"
+    bundle_dir = Path(export_root) / run_id
+    art_dir    = bundle_dir / "artifacts"
+    art_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy every artifact that exists in the run directory.
+    for fname in _ARTIFACT_NAMES:
+        src = run_dir / fname
+        if src.exists():
+            shutil.copy2(src, art_dir / fname)
+
+    # Write portable report.json (no private _ keys).
+    public = {k: v for k, v in report_dict.items() if not k.startswith("_")}
+    (bundle_dir / "report.json").write_text(
+        json.dumps(public, indent=2, default=str), encoding="utf-8"
+    )
+
+    # Write portable HTML — artifact hrefs are relative to the bundle root.
+    (bundle_dir / "report.html").write_text(
+        build_html_report(report_dict, artifact_prefix="artifacts/"),
+        encoding="utf-8",
+    )
+
+    return bundle_dir
 
 
 # ── main entry point ──────────────────────────────────────────────────────────

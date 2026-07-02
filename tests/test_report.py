@@ -6,7 +6,9 @@ import json
 import pytest
 from pathlib import Path
 
-from pkgids.report import normalize, build_report, build_html_report, report
+from pkgids.report import (
+    normalize, build_report, build_html_report, report, export_bundle,
+)
 
 
 # ── fixtures / helpers ────────────────────────────────────────────────────────
@@ -801,3 +803,141 @@ class TestReport:
         _minimal_run(tmp_path)
         report(tmp_path, diff=None)
         assert not (tmp_path / "diff.json").exists()
+
+
+# ── TestExportBundle ──────────────────────────────────────────────────────────
+
+class TestExportBundle:
+    """Tests for export_bundle() — portable, desktop-friendly report packages."""
+
+    def _setup(self, tmp_path: Path):
+        """Create a minimal run dir and build a report dict."""
+        run_dir = tmp_path / "runs" / "20240101T000000Z-pypi-mypkg-1.0.0"
+        run_dir.mkdir(parents=True)
+        _minimal_run(run_dir)
+        # Write a couple of artifact files so copy behaviour is testable.
+        (run_dir / "telemetry.jsonl").write_text('{"event_type":"exec"}\n', encoding="utf-8")
+        norm = normalize(run_dir)
+        rep  = build_report(norm)
+        return run_dir, rep
+
+    # ── bundle structure ──────────────────────────────────────────────────────
+
+    def test_bundle_dir_created(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert bundle.is_dir()
+
+    def test_bundle_named_after_run_id(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert bundle.name == run_dir.name
+
+    def test_artifacts_subdir_created(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert (bundle / "artifacts").is_dir()
+
+    def test_run_json_copied(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert (bundle / "artifacts" / "run.json").exists()
+
+    def test_telemetry_jsonl_copied(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert (bundle / "artifacts" / "telemetry.jsonl").exists()
+
+    def test_missing_artifacts_not_copied(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        # capture.pcap is not present in minimal run — should NOT be in export
+        assert not (bundle / "artifacts" / "capture.pcap").exists()
+
+    def test_report_json_written(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert (bundle / "report.json").exists()
+        data = json.loads((bundle / "report.json").read_text())
+        assert "verdict" in data
+        assert not any(k.startswith("_") for k in data)
+
+    def test_report_html_written(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        assert (bundle / "report.html").exists()
+        html = (bundle / "report.html").read_text()
+        assert "<!DOCTYPE html>" in html
+
+    # ── portable links ────────────────────────────────────────────────────────
+
+    def test_exported_html_uses_relative_links(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        html = (bundle / "report.html").read_text()
+        assert "artifacts/run.json" in html
+
+    def test_exported_html_has_no_absolute_file_uris(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        html = (bundle / "report.html").read_text()
+        assert "file:///" not in html
+
+    def test_missing_artifact_renders_gracefully(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        export_root = tmp_path / "exports"
+        bundle = export_bundle(run_dir, rep, export_root=export_root)
+        html = (bundle / "report.html").read_text()
+        # capture.pcap is missing — should show as "missing", not crash
+        assert "capture.pcap" in html
+        assert "missing" in html
+
+    # ── default export_root ───────────────────────────────────────────────────
+
+    def test_default_export_root_is_sibling_of_runs(self, tmp_path: Path):
+        run_dir, rep = self._setup(tmp_path)
+        # run_dir is tmp_path/runs/<id>/ → default export root = tmp_path/exports/
+        bundle = export_bundle(run_dir, rep)
+        assert bundle.parent == tmp_path / "exports"
+
+    # ── repeated runs ─────────────────────────────────────────────────────────
+
+    def test_separate_runs_get_separate_bundles(self, tmp_path: Path):
+        export_root = tmp_path / "exports"
+        for run_name in ("20240101T000000Z-pypi-pkgA-1.0.0",
+                         "20240102T000000Z-pypi-pkgB-2.0.0"):
+            run_dir = tmp_path / "runs" / run_name
+            run_dir.mkdir(parents=True)
+            _minimal_run(run_dir)
+            norm = normalize(run_dir)
+            rep  = build_report(norm)
+            export_bundle(run_dir, rep, export_root=export_root)
+        bundles = list(export_root.iterdir())
+        assert len(bundles) == 2
+
+    # ── cmd_report default HTML ───────────────────────────────────────────────
+
+    def test_report_always_writes_html_to_run_dir(self, tmp_path: Path):
+        """report() with output_html explicitly set writes HTML (API contract)."""
+        _minimal_run(tmp_path)
+        report(tmp_path, output_html=tmp_path / "report.html")
+        assert (tmp_path / "report.html").exists()
+
+    def test_build_html_report_relative_prefix(self, tmp_path: Path):
+        """build_html_report with artifact_prefix uses relative hrefs."""
+        _minimal_run(tmp_path)
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        html = build_html_report(rep, artifact_prefix="artifacts/")
+        assert "artifacts/run.json" in html
+        assert "file:///" not in html

@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
             "resolve; this mode is intended to observe dependency-mediated behavior."
         ),
     )
+    detonate.add_argument(
+        "--no-report",
+        action="store_true",
+        default=False,
+        help="Skip automatic report generation and export bundle after detonation.",
+    )
 
     # ── fetch ─────────────────────────────────────────────────────────────────
     fetch_cmd = subparsers.add_parser(
@@ -197,6 +203,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-diff", action="store_true", default=False,
         help="Skip the baseline diff step even if Supabase is configured",
     )
+    report_cmd.add_argument(
+        "--no-export", action="store_true", default=False,
+        help="Skip creating a portable export bundle in exports/<run-id>/",
+    )
+    report_cmd.add_argument(
+        "--export-dir", metavar="DIR", default=None,
+        help="Root directory for export bundles (default: exports/ next to runs/)",
+    )
 
     # ── validate ──────────────────────────────────────────────────────────────
     validate_cmd = subparsers.add_parser(
@@ -254,6 +268,7 @@ def cmd_detonate(args: argparse.Namespace) -> int:
     if code is not None:
         return code
 
+    from pathlib import Path as _Path
     from .capture import run as _run
 
     skip_import = True if args.skip_import else None
@@ -269,6 +284,22 @@ def cmd_detonate(args: argparse.Namespace) -> int:
         return 1
 
     print(json.dumps(summary, indent=2))
+
+    if not args.no_report:
+        from .report import report as _report, export_bundle as _export_bundle
+        run_dir = _Path(summary.get("run_dir", ""))
+        if run_dir.exists():
+            try:
+                html_out = run_dir / "report.html"
+                json_out = run_dir / "report.json"
+                rep = _report(run_dir, output_html=html_out, output_json=json_out)
+                bundle = _export_bundle(run_dir, rep)
+                print(f"[report] html   -> {html_out}")
+                print(f"[report] export -> {bundle}")
+            except Exception as exc:
+                print(f"[report] warning: report generation failed: {exc}",
+                      file=sys.stderr)
+
     return 0
 
 
@@ -467,12 +498,15 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     from pathlib import Path as _Path
-    from .report import report as _report
+    from .report import report as _report, export_bundle as _export_bundle
 
     run_dir = _Path(args.run_dir)
     if not run_dir.exists():
         print(f"error: run directory not found: {run_dir}", file=sys.stderr)
         return 1
+
+    # Default HTML output to <run_dir>/report.html when not explicitly set.
+    output_html = args.output_html or str(run_dir / "report.html")
 
     # ── optionally auto-compute a diff ────────────────────────────────────────
     diff: dict | None = None
@@ -505,14 +539,13 @@ def cmd_report(args: argparse.Namespace) -> int:
             run_dir,
             diff=diff,
             output_json=args.output_json,
-            output_html=args.output_html,
+            output_html=output_html,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     # Print terse summary
-    run                = result.get("run", {})
     verdict            = result.get("verdict", "unknown")
     behavioral_verdict = result.get("behavioral_verdict", verdict)
     advisory_status    = result.get("advisory_status", "none")
@@ -528,8 +561,16 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"{'tactics':<12} {tactics}")
     if args.output_json:
         print(f"{'json':<12} {args.output_json}")
-    if args.output_html:
-        print(f"{'html':<12} {args.output_html}")
+    print(f"{'html':<12} {output_html}")
+
+    # ── portable export bundle ────────────────────────────────────────────────
+    if not args.no_export:
+        try:
+            export_root = _Path(args.export_dir) if args.export_dir else None
+            bundle = _export_bundle(run_dir, result, export_root=export_root)
+            print(f"{'export':<12} {bundle}")
+        except Exception as exc:
+            print(f"warning: export bundle failed: {exc}", file=sys.stderr)
 
     return 2 if verdict == "malicious" else (1 if verdict == "suspicious" else 0)
 
