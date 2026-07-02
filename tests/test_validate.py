@@ -66,6 +66,43 @@ class TestPredict:
         s["network_activity"] = {"install": False, "import": False}
         assert predict(s) == "benign"
 
+    def test_any_suspicious_in_install_is_malicious(self):
+        s = _summary()
+        s["phases"]["install"]["process_activity"] = {
+            "any_suspicious": True, "process_count": 2,
+            "telemetry_limited_process": False,
+            "suspicious_execs": [{"pid": 1, "executable": "/usr/bin/curl", "argv": ["curl"]}],
+        }
+        assert predict(s) == "malicious"
+
+    def test_any_suspicious_in_import_is_malicious(self):
+        s = _summary()
+        s["phases"]["import"]["process_activity"] = {
+            "any_suspicious": True, "process_count": 3,
+            "telemetry_limited_process": False,
+            "suspicious_execs": [{"pid": 2, "executable": "/bin/bash", "argv": ["bash", "-c", "id"]}],
+        }
+        assert predict(s) == "malicious"
+
+    def test_no_process_activity_key_still_benign(self):
+        # Older run.json files without process_activity must not break predict()
+        s = _summary()
+        assert predict(s) == "benign"
+
+    def test_process_activity_none_is_benign(self):
+        s = _summary()
+        s["phases"]["install"]["process_activity"] = None
+        assert predict(s) == "benign"
+
+    def test_telemetry_limited_process_with_no_suspicious_is_benign(self):
+        # Limited telemetry can't rule out suspicious, but we don't auto-escalate
+        s = _summary()
+        s["phases"]["install"]["process_activity"] = {
+            "any_suspicious": False, "process_count": 0,
+            "telemetry_limited_process": True, "suspicious_execs": [],
+        }
+        assert predict(s) == "benign"
+
 
 # ── compute_report() unit tests ───────────────────────────────────────────────
 
