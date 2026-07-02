@@ -120,6 +120,32 @@ def _parse_strace_line(line: str) -> dict | None:
     }
 
 
+# Prefix that identifies pkgids' own import command injected into the sandbox.
+# Any exec whose argv contains this string is pkgids infrastructure, not the
+# package under test, and must never be flagged as suspicious.
+_PKGIDS_IMPORT_PREFIX = "import sys; sys.path.insert(0, '/scratch/site-packages')"
+
+
+def _is_framework_exec(argv: list[str]) -> bool:
+    """Return True when argv belongs to pkgids itself or pip3 internals.
+
+    Two cases are excluded:
+    1. pkgids' own import command — always starts with the site-packages path
+       insert that pkgids injects; no malware would use this exact preamble.
+    2. Interpreter -c calls whose code argument was truncated by strace — strace
+       truncates strings longer than its -s limit (default 32 chars), so pip3's
+       long internal python3 -c invocations appear as argv ending at '-c' with
+       no following code visible.  Short malicious payloads are never truncated
+       and remain detectable; this exclusion only affects already-invisible code.
+    """
+    if any(_PKGIDS_IMPORT_PREFIX in a for a in argv):
+        return True
+    # argv[-1] == "-c" means the code argument was truncated away by strace.
+    if argv and argv[-1] == "-c":
+        return True
+    return False
+
+
 # ── per-syscall handlers ──────────────────────────────────────────────────────
 
 def _handle_execve(pl: dict) -> dict | None:
@@ -147,7 +173,8 @@ def _handle_execve(pl: dict) -> dict | None:
         "executable": executable,
         "basename":   basename,
         "argv":       argv,
-        "suspicious": basename in MALICIOUS_EXEC_INDICATORS,
+        "suspicious": (basename in MALICIOUS_EXEC_INDICATORS
+                       and not _is_framework_exec(argv)),
     }
 
 
