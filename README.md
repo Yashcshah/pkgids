@@ -83,7 +83,12 @@ See [architecture.md](architecture.md) for the full system diagram.
 
 6. **Per-phase attribution** - each sandbox call is bracketed by time.time() snapshots forming a [t_start, t_end] window. _read_phase_entries() reads the appliance JSONL log and keeps only entries whose ts field falls within that window. Stale entries from IP recycling are excluded. This was the fix for a false-positive bug where a previous run's traffic was attributed to a benign package because Docker had recycled its detonet IP.
 
-7. **Verdict** - run.json records exit codes, durations, per-phase network_activity booleans, and paths to all output files. Prediction rule: malicious if any phase has network_activity=True or the install phase timed out, benign otherwise.
+7. **Advisory enrichment** - fetch.py queries OSV.dev for known advisories affecting the package name and version. The normalized result (hit, count, IDs, summaries, error) is stored in metadata.json alongside the artifact and surfaced in the report. If the OSV lookup fails or times out the run continues; advisory_error records the reason.
+
+8. **Verdict** - three distinct verdict fields appear in every report:
+   - `dynamic_verdict` — behavioral evidence only, from the additive scoring model: `no_malicious_behavior_observed` (score=0) / `low_risk` (1–24) / `suspicious` (25–49) / `likely_malicious` (50–74) / `malicious` (75–100). **No dynamic signal does not mean safe.**
+   - `advisory` — normalized OSV advisory summary.
+   - `verdict` (final) — analyst-facing combined verdict. Advisory hits elevate packages with no or low dynamic signal to `known_vulnerable`. Dynamic signals at suspicious or above are preserved; advisory corroboration is noted in `verdict_basis` ("both").
 
 ---
 
@@ -116,8 +121,9 @@ See [architecture.md](architecture.md) for the full system diagram.
 | pkgids/validate.py | Reads a labeled CSV, runs capture.run() for each sample (skipping already-completed rows for resumability), computes TP/FP/TN/FN and detection and FP rates. Supports --local-artifacts for corpus validation from local sdists. |
 | pkgids/dataset.py | Fetches malicious-package records from the OpenSSF malicious-packages repository via the GitHub Contents API. Returns ecosystem, name, version, osv_id, summary dicts. Results are cached to data/malicious_<ecosystem>.json. |
 | pkgids/analyze.py | Cross-stream correlation engine. Detects file-before-exfil, shell-before-network, and subprocess payload patterns across strace telemetry and network logs. Writes correlations.json to the run directory. |
-| pkgids/score.py | Additive 0–100 scoring model. 16 weighted indicators; +25 exfiltration combo bonus when credential access and HTTP/TLS both appear. Four-tier verdict: benign / suspicious / likely_malicious / malicious. |
-| pkgids/report.py | Six-question HTML + JSON report: what happened, why the verdict, which phase, which host, which file, and how it differs from baseline. Writes behavior_profile.json and diff.json to the run directory alongside the report. |
+| pkgids/advisory.py | Best-effort OSV.dev advisory lookup. Returns a normalized 6-field summary (advisory_hit, advisory_source, advisory_count, advisory_ids, advisory_summaries, advisory_error). Never raises; errors are captured in advisory_error. |
+| pkgids/score.py | Additive 0–100 scoring model. 16 weighted indicators; +25 exfiltration combo bonus when credential access and HTTP/TLS both appear. Five-tier behavioral verdict: no_malicious_behavior_observed / low_risk / suspicious / likely_malicious / malicious. |
+| pkgids/report.py | Six-question HTML + JSON report: what happened, why the verdict, which phase, which host, which file, and how it differs from baseline. Separates dynamic behavioral verdict, advisory intelligence, and final analyst-facing verdict. Writes behavior_profile.json and diff.json to the run directory alongside the report. |
 | infra/fakeinternet/responder.py | Pure-stdlib Python. DNS server (UDP 53) that resolves every hostname to itself. TCP listeners on ports 21, 25, 80, 443, 8080. Extracts HTTP Host header and request line, TLS SNI, SMTP/FTP banners. Writes JSONL to /logs/<src_ip>.jsonl. |
 
 ---
@@ -166,7 +172,13 @@ pkgids detonate npm lodash 4.17.21 --skip-import
 pkgids detonate pypi six 1.16.0 --run-dir /tmp/six-run
 ```
 
-Output is written to runs/<timestamp>-<ecosystem>-<name>-<version>/ as run.json.
+By default pip runs with `--no-deps` so the package is isolated. To allow dependency installation inside the same sandboxed fake-internet environment (useful for packages whose malicious behavior is triggered by dependency code):
+```bash
+pkgids detonate pypi some-package 1.0 --with-deps
+```
+Dependencies fetch through the fake-internet sink. Network egress is still blocked; dependency fetches will fail if PyPI is not reachable, causing `install_status=failed`. This mode is best used when you suspect dependency-mediated malicious behavior and are willing to accept a noisier run. The default `--no-deps` behavior remains unchanged.
+
+Output is written to `runs/<timestamp>-<ecosystem>-<name>-<version>/` as `run.json`.
 
 Browse the OpenSSF malicious-packages dataset without executing anything:
 ```bash
@@ -323,6 +335,51 @@ Once sdists are available, run validation with:
 ```bash
 pkgids validate --local-artifacts data/corpus_samples.csv
 ```
+
+---
+
+## Verdict Reference
+
+### Dynamic behavioral verdict (`dynamic_verdict`)
+
+Derived from the additive scoring model in `score.py`. Based solely on what the sandbox observed at runtime.
+
+| Verdict | Score | Meaning |
+|---------|-------|---------|
+| `no_malicious_behavior_observed` | 0 | No indicators detected. **Does not mean the package is safe** — only that this run observed nothing suspicious. |
+| `low_risk` | 1–24 | Weak signals detected but below the suspicious threshold. |
+| `suspicious` | 25–49 | Meaningful behavioral signal; warrants closer review. |
+| `likely_malicious` | 50–74 | High-confidence behavioral evidence of malicious intent. |
+| `malicious` | 75–100 | Strong multi-indicator evidence of malicious behavior. |
+
+### Advisory intelligence (`advisory`)
+
+Queried from OSV.dev at fetch time. Normalized to six fields:
+- `advisory_hit` — True if one or more advisories matched this package version
+- `advisory_source` — "osv" on success, null if the lookup failed
+- `advisory_count` — number of matching advisories
+- `advisory_ids` — OSV IDs, CVEs, and GHSA aliases
+- `advisory_summaries` — short human-readable descriptions (truncated to 200 chars each)
+- `advisory_error` — error message if the lookup failed, else null
+
+If the OSV lookup times out or fails the run still completes; only `advisory_error` is set.
+
+### Final analyst verdict (`verdict`)
+
+Combines dynamic verdict and advisory intelligence:
+
+| Dynamic verdict | Advisory hit | Final verdict | Basis |
+|----------------|-------------|---------------|-------|
+| `no_malicious_behavior_observed` | yes | `known_vulnerable` | advisory |
+| `low_risk` | yes | `known_vulnerable` | advisory |
+| `suspicious` | yes | `suspicious` | both |
+| `likely_malicious` | yes | `likely_malicious` | both |
+| `malicious` | yes | `malicious` | both |
+| any | no | (same as dynamic) | dynamic |
+
+Advisory intelligence can only escalate, never lower, the final verdict.
+
+> **Note on bin-collection:** CVE-2022-34501 wording is inconsistent across sources ("before v0.1" vs "versions including 0.1"). pkgids faithfully reports whatever OSV.dev returns at query time. A `no_malicious_behavior_observed` dynamic verdict for bin-collection 0.1 does not rule out malicious intent — the sandbox may not have triggered the payload. Check `advisory_hit` in the report for current advisory status.
 
 ---
 

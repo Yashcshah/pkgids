@@ -189,10 +189,12 @@ class TestBuildReport:
         rep = build_report(self._clean_norm())
         assert isinstance(rep["confidence"], float)
 
-    def test_clean_package_is_benign(self):
+    def test_clean_package_no_malicious_behavior(self):
         rep = build_report(self._clean_norm())
-        assert rep["verdict"] == "benign"
-        assert rep["score"]   == 0
+        assert rep["verdict"]         == "no_malicious_behavior_observed"
+        assert rep["dynamic_verdict"] == "no_malicious_behavior_observed"
+        assert rep["verdict_basis"]   == "dynamic"
+        assert rep["score"]           == 0
 
     def test_clean_package_confidence_zero(self):
         rep = build_report(self._clean_norm())
@@ -329,6 +331,72 @@ class TestBuildReport:
         rep = build_report(norm)
         assert "_correlations" in rep
 
+    # ── advisory enrichment ───────────────────────────────────────────────────
+
+    def _advisory_norm(self, advisory: dict) -> dict:
+        norm = self._clean_norm()
+        norm["advisory"] = advisory
+        return norm
+
+    def _hit_advisory(self) -> dict:
+        return {
+            "advisory_hit":       True,
+            "advisory_source":    "osv",
+            "advisory_count":     1,
+            "advisory_ids":       ["PYSEC-2022-999", "CVE-2022-34501"],
+            "advisory_summaries": ["Remote code execution via malicious setup.py"],
+            "advisory_error":     None,
+        }
+
+    def test_advisory_hit_no_dynamic_signal_gives_known_vulnerable(self):
+        rep = build_report(self._advisory_norm(self._hit_advisory()))
+        assert rep["verdict"]       == "known_vulnerable"
+        assert rep["verdict_basis"] == "advisory"
+
+    def test_advisory_hit_dynamic_verdict_preserved(self):
+        rep = build_report(self._advisory_norm(self._hit_advisory()))
+        assert rep["dynamic_verdict"] == "no_malicious_behavior_observed"
+
+    def test_advisory_field_in_report(self):
+        rep = build_report(self._advisory_norm(self._hit_advisory()))
+        adv = rep["advisory"]
+        assert adv["advisory_hit"]    is True
+        assert adv["advisory_count"]  == 1
+        assert "PYSEC-2022-999"       in adv["advisory_ids"]
+        assert "CVE-2022-34501"       in adv["advisory_ids"]
+
+    def test_no_advisory_hit_verdict_stays_dynamic(self):
+        no_hit = {
+            "advisory_hit": False, "advisory_source": "osv",
+            "advisory_count": 0, "advisory_ids": [], "advisory_summaries": [],
+            "advisory_error": None,
+        }
+        rep = build_report(self._advisory_norm(no_hit))
+        assert rep["verdict"]       == "no_malicious_behavior_observed"
+        assert rep["verdict_basis"] == "dynamic"
+
+    def test_advisory_hit_mentioned_in_narrative(self):
+        rep = build_report(self._advisory_norm(self._hit_advisory()))
+        full = " ".join(rep["narrative"])
+        assert "advisory" in full.lower()
+        assert "PYSEC-2022-999" in full or "CVE-2022-34501" in full
+
+    def test_advisory_missing_from_norm_does_not_crash(self):
+        norm = self._clean_norm()
+        # no "advisory" key at all
+        rep = build_report(norm)
+        assert rep["verdict_basis"] == "dynamic"
+
+    def test_advisory_error_does_not_elevate_verdict(self):
+        error_adv = {
+            "advisory_hit": False, "advisory_source": None,
+            "advisory_count": 0, "advisory_ids": [], "advisory_summaries": [],
+            "advisory_error": "OSV query timed out",
+        }
+        rep = build_report(self._advisory_norm(error_adv))
+        assert rep["verdict"]       == "no_malicious_behavior_observed"
+        assert rep["verdict_basis"] == "dynamic"
+
 
 # ── build_html_report() ───────────────────────────────────────────────────────
 
@@ -338,8 +406,11 @@ class TestBuildHtmlReport:
             "package":       {"ecosystem": "pypi", "name": "mypkg", "version": "1.0.0"},
             "_run":          {"ecosystem": "pypi", "name": "mypkg", "version": "1.0.0",
                               "run_dir": ""},
-            "verdict":       "benign",
-            "score":         0,
+            "verdict":         "no_malicious_behavior_observed",
+            "dynamic_verdict": "no_malicious_behavior_observed",
+            "verdict_basis":   "dynamic",
+            "advisory":        {},
+            "score":           0,
             "confidence":    0.0,
             "attack_tactics": [],
             "techniques":    [],
@@ -396,9 +467,17 @@ class TestBuildHtmlReport:
         html = build_html_report(self._rep(verdict="suspicious", score=30))
         assert "#e67e22" in html
 
-    def test_benign_verdict_green(self):
-        html = build_html_report(self._rep(verdict="benign", score=0))
+    def test_low_risk_verdict_green(self):
+        html = build_html_report(self._rep(verdict="low_risk", score=10))
         assert "#27ae60" in html
+
+    def test_no_malicious_behavior_observed_verdict_grey(self):
+        html = build_html_report(self._rep(verdict="no_malicious_behavior_observed", score=0))
+        assert "#7f8c8d" in html
+
+    def test_known_vulnerable_verdict_purple(self):
+        html = build_html_report(self._rep(verdict="known_vulnerable", score=0))
+        assert "#8e44ad" in html
 
     # ── six-question sections ─────────────────────────────────────────────────
 

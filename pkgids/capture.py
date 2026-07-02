@@ -59,19 +59,22 @@ def _stop_tcpdump(proc: subprocess.Popen) -> None:
 
 # ── command builders ──────────────────────────────────────────────────────────
 
-def _install_command(ecosystem: str, artifact_name: str) -> list[str]:
+def _install_command(ecosystem: str, artifact_name: str,
+                     with_deps: bool = False) -> list[str]:
     if ecosystem == "pypi":
         # Install to /scratch/site-packages (tmpfs) so the package is visible
         # to the import phase running in the same container.  --target writes
         # directly to that directory without touching the system site-packages.
-        return [
+        cmd = [
             "pip3", "install",
             "--break-system-packages",
             "--no-build-isolation",
-            "--no-deps",
             "--target", "/scratch/site-packages",
-            f"/work/{artifact_name}",
         ]
+        if not with_deps:
+            cmd.append("--no-deps")
+        cmd.append(f"/work/{artifact_name}")
+        return cmd
     if ecosystem == "npm":
         return [
             "npm", "install",
@@ -398,6 +401,7 @@ def run(
     post_install_idle_secs: int | None = None,
     post_import_idle_secs: int | None = None,
     skip_import_on_install_failure: bool | None = None,
+    with_deps: bool = False,
 ) -> dict:
     """Full detonation pipeline for one package.
 
@@ -531,7 +535,7 @@ def run(
     skip_import_due_to_fail:  bool = False
     skip_import_reason:       str  = "skip_import" if effective_skip_import else ""
 
-    install_cmd = _install_command(ecosystem, artifact.name)
+    install_cmd = _install_command(ecosystem, artifact.name, with_deps=with_deps)
     import_cmd  = _import_command(ecosystem, name)
 
     try:
@@ -752,10 +756,11 @@ def run(
         "sandbox_ip":     sandbox_info.get("sandbox_ip")     if sandbox_info else None,
         "image":          sbx_cfg.get("image",   "pkgids-sandbox:latest"),
         "runtime":        sbx_cfg.get("runtime", "runsc"),
-        "env_vars":       {},   # no env vars injected by the current rig
-        "install_cmd":    install_cmd,
-        "import_cmd":     None if effective_skip_import else import_cmd,
-        "module_name":    _top_module_name(ecosystem, name),
+        "env_vars":            {},   # no env vars injected by the current rig
+        "install_cmd":         install_cmd,
+        "import_cmd":          None if effective_skip_import else import_cmd,
+        "module_name":         _top_module_name(ecosystem, name),
+        "install_deps_enabled": with_deps,
     }
 
     telemetry_jsonl_path = run_dir / "telemetry.jsonl"

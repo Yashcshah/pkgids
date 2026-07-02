@@ -12,6 +12,7 @@ from pathlib import Path
 import requests
 
 from . import config as _cfg
+from .advisory import query_osv as _query_osv
 
 
 # ── internal helpers ─────────────────────────────────────────────────────────
@@ -109,6 +110,7 @@ def _fetch_pypi(name: str, version: str, root: Path) -> Path:
         "file_count": len(members),
         "install_hooks": {"has_setup_py": has_setup_py},
         "sha256": expected,
+        "advisory": _query_osv("pypi", name, version),
     }
     (dest_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
     return artifact
