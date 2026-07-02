@@ -179,7 +179,7 @@ Validate against a labeled CSV:
 # Against live registry packages:
 pkgids validate --samples data/benign_samples.csv
 
-# Against locally-built corpus sdists (corpus/ must be built separately — see Corpus section):
+# Against locally-built corpus sdists (corpus/ must be built separately see Corpus section):
 pkgids validate --samples data/corpus_samples.csv --local-artifacts
 ```
 
@@ -244,7 +244,7 @@ clear_logs_each_run = true
 
 ---
 
-## Supabase Setup (Optional — remote persistence only)
+## Supabase Setup (Optional remote persistence only)
 
 pkgids generates all run artifacts locally without Supabase. Every detonation writes `run.json`, `network.jsonl`, `telemetry.jsonl`, `behavior_profile.json`, `correlations.json`, and (when a diff is provided) `diff.json` to the run directory. None of this requires a database.
 
@@ -262,8 +262,8 @@ Supabase is only required for the remote persistence commands:
 The complete schema lives in two files that must be run in order:
 
 ```
-migrations/001_baseline_schema.sql   — packages, behavior_profiles, behavior_diffs tables
-migrations/002_add_risk_delta.sql    — adds risk_delta column to behavior_diffs
+migrations/001_baseline_schema.sql   ~ packages, behavior_profiles, behavior_diffs tables
+migrations/002_add_risk_delta.sql    ~ adds risk_delta column to behavior_diffs
 ```
 
 To apply them: open the Supabase dashboard for your project → SQL Editor → New Query → paste and run each file in order.
@@ -308,7 +308,7 @@ in the Supabase SQL editor.
 See the 'Supabase Setup' section in README.md for full instructions.
 ```
 
-`pkgids detonate` and `pkgids report` are unaffected — they write local artifacts only.
+`pkgids detonate` and `pkgids report` are unaffected they write local artifacts only.
 
 ---
 
@@ -328,7 +328,7 @@ pkgids validate --local-artifacts data/corpus_samples.csv
 
 ## Limitations and Future Work
 
-**Import-time callbacks — architecture fixed, corpus rerun pending.** canary-import-callback puts its payload in `__init__.py`. The single-container approach (install writes to `/scratch/site-packages`, import prepends that to `sys.path`) means the import phase can now find and execute what install placed. This should close the previous false negative. The corpus has not been re-detonated to confirm; run `pkgids validate --local-artifacts data/corpus_samples.csv` once corpus sdists are built to verify.
+**Import-time callbacks architecture fixed, corpus rerun pending.** canary-import-callback puts its payload in `__init__.py`. The single-container approach (install writes to `/scratch/site-packages`, import prepends that to `sys.path`) means the import phase can now find and execute what install placed. This should close the previous false negative. The corpus has not been re-detonated to confirm; run `pkgids validate --local-artifacts data/corpus_samples.csv` once corpus sdists are built to verify.
 
 **Supported ecosystems.** Deep support exists for PyPI (sdist/wheel preference, SHA-256 integrity, metadata.json) and npm. Other ecosystems such as RubyGems, crates.io, and Maven are not supported.
 
