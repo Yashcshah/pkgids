@@ -465,6 +465,31 @@ _PHASE_COLOR: dict[str, str] = {
     "install": "#8e44ad",
     "import":  "#2471a3",
 }
+_THREAT_CLASS: dict[str, str] = {
+    "malicious":                      "malicious",
+    "likely_malicious":               "likely",
+    "suspicious":                     "suspicious",
+    "known_vulnerable":               "vulnerable",
+    "low_risk":                       "benign",
+    "no_malicious_behavior_observed": "benign",
+    "benign":                         "benign",
+}
+_TACTIC_ID: dict[str, str] = {
+    "Command and Control": "TA0011",
+    "Execution":           "TA0002",
+    "Persistence":         "TA0003",
+    "Discovery":           "TA0007",
+    "Credential Access":   "TA0006",
+    "Defense Evasion":     "TA0005",
+    "Exfiltration":        "TA0010",
+    "Collection":          "TA0009",
+    "Initial Access":      "TA0001",
+    "Lateral Movement":    "TA0008",
+    "Privilege Escalation":"TA0004",
+    "Impact":              "TA0040",
+    "Resource Development":"TA0042",
+    "Reconnaissance":      "TA0043",
+}
 
 
 def build_html_report(report_dict: dict) -> str:  # noqa: C901
@@ -517,14 +542,34 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
     vcolor  = _VERDICT_COLOR.get(verdict_str, "#7f8c8d")
     verdict_label = verdict_str.replace("_", " ").upper()
 
+    # ── helpers ───────────────────────────────────────────────────────────────
+    def _pill(severity: str) -> str:
+        cls = severity.lower() if severity.lower() in ("critical","high","medium","low") else "low"
+        short = {"critical":"crit","high":"high","medium":"med","low":"low"}.get(cls, cls)
+        return f'<span class="pill {cls}">{short}</span>'
+
+    def _ptag(phase: str) -> str:
+        if not phase:
+            return '<span class="dim">—</span>'
+        cls = phase if phase in ("install", "import") else ""
+        cls_attr = f' class="ptag {cls}"' if cls else ' class="ptag"'
+        return f'<span{cls_attr}>{e(phase)}</span>'
+
+    def _meter_zone(s: int) -> str:
+        if s >= 75: return "z4"
+        if s >= 50: return "z3"
+        if s >= 25: return "z2"
+        return "z1"
+
     # ── 1. Narrative ──────────────────────────────────────────────────────────
     narrative_html = "\n".join(f"<p>{e(s)}</p>" for s in narrative) \
         or '<p class="muted">No summary available.</p>'
+    verdict_summary = e(narrative[0]) if narrative else "No behavioral summary available."
 
-    # ── 1b. Advisory section ──────────────────────────────────────────────────
+    # ── 1b. Advisory / verdict breakdown section ──────────────────────────────
     adv_hit    = advisory.get("advisory_hit", False)
     adv_count  = advisory.get("advisory_count", 0)
-    adv_src    = advisory.get("advisory_source") or "—"
+    adv_src    = advisory.get("advisory_source") or "osv"
     adv_err    = advisory.get("advisory_error")
     adv_ids    = advisory.get("advisory_ids") or []
     adv_sums   = advisory.get("advisory_summaries") or []
@@ -535,76 +580,90 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
         "advisory": "advisory intelligence (no runtime trigger observed)",
         "both":     "behavioral evidence + advisory intelligence",
     }.get(verdict_basis, verdict_basis)
-    adv_status_label = {
-        "none":         "None",
-        "advisory_hit": "HIT",
-        "lookup_failed": "LOOKUP FAILED",
-    }.get(adv_status, adv_status.upper())
-    adv_status_color = {
-        "none":         "#27ae60",
-        "advisory_hit": "#c0392b",
-        "lookup_failed": "#e67e22",
-    }.get(adv_status, "#7f8c8d")
+
+    adv_dot_color = "#c0392b" if adv_hit else ("#e67e22" if adv_err else "#27ae60")
+    adv_note_txt  = (
+        f"{e(adv_src)} · {adv_count} {'advisory' if adv_count == 1 else 'advisories'}"
+        if not adv_err else f"lookup failed — {e(adv_err)}"
+    )
+    adv_label = (
+        "HIT" if adv_hit else ("LOOKUP FAILED" if adv_err else "None")
+    )
 
     adv_id_cells = "".join(
         f'<tr><td><code>{e(i)}</code></td>'
         f'<td class="ev">{e(s)}</td></tr>\n'
         for i, s in zip(adv_ids, adv_sums + [""] * len(adv_ids))
-    ) or '<tr><td colspan="2" class="muted">No advisories found</td></tr>'
+    )
+    adv_table = (
+        f'<table style="margin-top:14px"><thead><tr>'
+        f'<th>ID / Alias</th><th>Summary</th></tr></thead>'
+        f'<tbody>{adv_id_cells}</tbody></table>'
+    ) if adv_id_cells else ""
 
     advisory_section = f"""
-  <section>
-    <h2>Verdict Breakdown <span class="q">Three-layer analysis</span></h2>
-    <div class="meta" style="margin-bottom:12px">
-      <div class="meta-item"><label>Behavioral verdict</label>
-        <span style="color:{bv_color};font-weight:700">
-          {e(behavioral_verdict.replace('_',' ').upper())}</span></div>
-      <div class="meta-item"><label>Advisory status</label>
-        <span style="color:{adv_status_color};font-weight:700">
-          {e(adv_status_label)}</span></div>
-      <div class="meta-item"><label>Final verdict</label>
-        <span style="color:{fv_color};font-weight:700">
-          {e(verdict_str.replace('_',' ').upper())}</span></div>
-      <div class="meta-item"><label>Verdict basis</label>
-        <span>{e(basis_desc)}</span></div>
-      <div class="meta-item"><label>Advisory source</label><span>{e(adv_src)}</span></div>
-      <div class="meta-item"><label>Advisory count</label><span>{adv_count}</span></div>
-      {'<div class="meta-item"><label>Lookup error</label>'
-       f'<span style="color:#c0392b">{e(adv_err)}</span></div>' if adv_err else ''}
+  <section class="section">
+    <header><h2>Verdict breakdown</h2><span class="q">three-layer analysis</span></header>
+    <div class="body">
+      <div class="layers">
+        <div class="layer">
+          <label>Behavioral</label>
+          <div class="val">
+            <span class="mini-dot" style="background:{bv_color}"></span>
+            {e(behavioral_verdict.replace("_"," ").title())}
+          </div>
+          <div class="note">from sandbox trace</div>
+        </div>
+        <div class="layer">
+          <label>Advisory</label>
+          <div class="val">
+            <span class="mini-dot" style="background:{adv_dot_color}"></span>
+            {e(adv_label)}
+          </div>
+          <div class="note">{adv_note_txt}</div>
+        </div>
+        <div class="layer final">
+          <label>Final verdict</label>
+          <div class="val">
+            <span class="mini-dot" style="background:var(--threat)"></span>
+            {e(verdict_str.replace("_"," ").title())}
+          </div>
+          <div class="note">basis: {e(basis_desc)}</div>
+        </div>
+      </div>
+      <div class="basis-row">
+        <span><b>Advisory source</b> · {e(adv_src)}</span>
+        <span><b>Advisory count</b> · {adv_count}</span>
+        <span><b>Verdict basis</b> · {e(basis_desc)}</span>
+        {'<span style="color:#c0392b"><b>Lookup error</b> · ' + e(adv_err) + '</span>' if adv_err else ''}
+      </div>
+      {adv_table}
     </div>
-    <table>
-      <thead><tr><th>ID / Alias</th><th>Summary</th></tr></thead>
-      <tbody>{adv_id_cells}</tbody>
-    </table>
   </section>"""
 
-    sev_chips = ""
-    if summary.get("critical"):
-        sev_chips += f'<span class="sev-chip critical">{summary["critical"]} critical</span> '
-    if summary.get("high"):
-        sev_chips += f'<span class="sev-chip high">{summary["high"]} high</span> '
-    if summary.get("medium"):
-        sev_chips += f'<span class="sev-chip medium">{summary["medium"]} medium</span> '
-    if summary.get("low"):
-        sev_chips += f'<span class="sev-chip low">{summary["low"]} low</span>'
+    # severity legend chips for hero
+    sev_legend = ""
+    for sev_name, sev_var in (("critical","--crit"),("high","--high"),("medium","--med"),("low","--low")):
+        cnt = summary.get(sev_name, 0)
+        zero_cls = " zero" if not cnt else ""
+        sev_legend += (
+            f'<div class="item{zero_cls}">'
+            f'<span class="dot" style="background:var({sev_var})"></span>'
+            f'{cnt} <b>{sev_name}</b></div>\n'
+        )
 
     # ── 2. Score Breakdown ────────────────────────────────────────────────────
     bd_rows = ""
     for item in breakdown.get("items", []):
-        sc = _SEV_COLOR.get(item.get("severity", "low"), "#999")
-        ph = item.get("phase", "")
-        ph_badge = (
-            f'<span class="phase-badge" style="background:{_PHASE_COLOR.get(ph,"#999")}">'
-            f'{e(ph)}</span>'
-            if ph else ""
-        )
+        sev  = item.get("severity", "low")
+        ph   = item.get("phase", "")
         bd_rows += (
             f'<tr>'
-            f'<td><span class="sev" style="background:{sc}">{e(item.get("severity",""))}</span></td>'
-            f'<td>{e(item.get("title",""))}</td>'
-            f'<td>{e(item.get("tactic",""))}</td>'
-            f'<td>{ph_badge}</td>'
-            f'<td class="pts">+{item.get("points",0)}</td>'
+            f'<td>{_pill(sev)}</td>'
+            f'<td class="finding">{e(item.get("title",""))}</td>'
+            f'<td class="dim">{e(item.get("tactic",""))}</td>'
+            f'<td>{_ptag(ph)}</td>'
+            f'<td class="t-num">+{item.get("points",0)}</td>'
             f'</tr>\n'
         )
     if breakdown.get("combo_bonus", 0):
@@ -613,87 +672,82 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
             f'<td colspan="3"><em>Exfiltration combo bonus</em>'
             f' <small>(network observed after credential-file access)</small></td>'
             f'<td></td>'
-            f'<td class="pts">+{breakdown["combo_bonus"]}</td>'
+            f'<td class="t-num">+{breakdown["combo_bonus"]}</td>'
             f'</tr>\n'
         )
     bd_rows += (
         f'<tr class="total-row">'
-        f'<td colspan="4"><strong>Total score</strong></td>'
-        f'<td class="pts"><strong>{score_val}/100</strong></td>'
+        f'<td colspan="4">Total score</td>'
+        f'<td class="t-num">{score_val} / 100</td>'
         f'</tr>\n'
     )
     if not breakdown.get("items"):
-        bd_rows = '<tr><td colspan="5" class="muted">No scoring contributions — no indicators detected.</td></tr>'
+        bd_rows = '<tr><td colspan="5" class="empty">No scoring contributions — no indicators detected.</td></tr>'
 
     # ── 3. ATT&CK tactics ─────────────────────────────────────────────────────
     tactic_chips = "".join(
-        f'<span class="chip">{e(t)}</span>' for t in tactics
+        f'<span class="tactic">{e(t)} <span class="k">{e(_TACTIC_ID.get(t,""))}</span></span>'
+        for t in tactics
     ) or '<span class="muted">none detected</span>'
     tech_row = (
-        '<div class="tech-row">Techniques: '
-        + " ".join(f'<code>{e(t)}</code>' for t in techniques)
+        '<div class="tech-row">'
+        '<span class="lbl dim">techniques</span>'
+        + "".join(f'<code>{e(t)}</code>' for t in techniques)
         + "</div>"
     ) if techniques else ""
 
     # ── 4. Indicators table ───────────────────────────────────────────────────
     ind_rows = ""
     for ind in indicators:
-        sc  = _SEV_COLOR.get(ind["severity"], "#7f8c8d")
         ev  = e(json.dumps(ind["evidence"], separators=(",", ":")))[:120]
         ph  = (ind.get("evidence") or {}).get("phase", "")
-        ph_badge = (
-            f'<span class="phase-badge" style="background:{_PHASE_COLOR.get(ph,"#999")}">'
-            f'{e(ph)}</span>'
-            if ph else '<span class="muted">—</span>'
-        )
         ind_rows += (
             f'<tr>'
-            f'<td><span class="sev" style="background:{sc}">{e(ind["severity"])}</span></td>'
-            f'<td>{e(ind["title"])}</td>'
+            f'<td>{_pill(ind["severity"])}</td>'
+            f'<td class="finding">{e(ind["title"])}</td>'
             f'<td><code>{e(ind["technique"])}</code></td>'
-            f'<td>{e(ind["tactic"])}</td>'
-            f'<td>{ph_badge}</td>'
+            f'<td class="dim">{e(ind["tactic"])}</td>'
+            f'<td>{_ptag(ph)}</td>'
             f'<td class="ev">{ev}</td>'
             f'</tr>\n'
         )
     if not ind_rows:
-        ind_rows = '<tr><td colspan="6" class="muted">No indicators found</td></tr>'
+        ind_rows = '<tr><td colspan="6" class="empty">No indicators found</td></tr>'
 
     # ── 5. Process tree ───────────────────────────────────────────────────────
     proc_html = ""
     for ph_name, ph in phases_detail.items():
-        pc = _PHASE_COLOR.get(ph_name, "#999")
         execs = ph.get("suspicious_execs") or []
         proc_html += (
-            f'<div class="pt-phase" style="color:{pc}">'
-            f'{e(ph_name)} phase</div>\n'
+            f'<div class="phase-group">'
+            f'<div class="phase-head">{_ptag(ph_name)}'
+            f'<span class="name">{e(ph_name)} phase</span>'
+            f'<span class="rule"></span></div>\n'
         )
         if execs:
             for ex in execs[:20]:
                 argv = " ".join(str(a) for a in (ex.get("argv") or []))
                 proc_html += (
-                    f'<div class="pt-proc">&#x2514;&#x2500; '
-                    f'<code>{e(argv[:160])}</code></div>\n'
+                    f'<div class="proc-line"><code>{e(argv[:160])}</code></div>\n'
                 )
         else:
-            proc_html += (
-                '<div class="pt-proc muted">(no suspicious processes)</div>\n'
-            )
+            proc_html += '<div class="proc-empty">no suspicious processes recorded</div>\n'
+        proc_html += '</div>\n'
 
     # Subprocess payload correlation
     sub_payloads = correlations.get("subprocess_payloads", [])
     if sub_payloads:
-        proc_html += "<div class='corr-heading'>Payload attribution</div>\n"
+        proc_html += '<div class="corr-heading">Payload attribution</div>\n'
         for sp in sub_payloads[:5]:
             payload = sp.get("payload_exec", {})
             parent  = sp.get("potential_parent", {})
             p_argv  = " ".join(str(a) for a in (payload.get("argv") or []))
             par_exe = (parent or {}).get("exe", "?") if parent else "(unknown)"
             proc_html += (
-                f'<div class="pt-proc">'
-                f'<span class="phase-badge" style="background:#c0392b">payload</span> '
+                f'<div class="proc-line">'
+                f'<span class="ptag" style="background:#c0392b;color:#fff;border-color:#c0392b">payload</span> '
                 f'<code>{e(p_argv[:100])}</code> '
-                f'<span class="muted">← spawned by {e(par_exe)}</span>'
+                f'<span class="dim">← spawned by {e(par_exe)}</span>'
                 f'</div>\n'
             )
 
@@ -780,24 +834,37 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
         nd = ", ".join(e(d) for d in (diff.get("new_domains") or [])) or "none"
         np = ", ".join(str(p) for p in (diff.get("new_ports") or []))   or "none"
         diff_section = f"""
-  <section>
-    <h2>&#x2198; How does this differ from prior versions?</h2>
-    <table>
-      <tr><th>From version</th><td>{e(str(diff.get("from_version") or "—"))}</td></tr>
-      <tr><th>To version</th><td>{e(str(diff.get("to_version") or "—"))}</td></tr>
-      <tr><th>Risk delta</th><td><strong>{e(str(diff.get("risk_delta") or "—"))}</strong></td></tr>
-      <tr><th>New domains</th><td>{nd}</td></tr>
-      <tr><th>New ports</th><td>{np}</td></tr>
-    </table>
+  <section class="section">
+    <header><h2>How does this differ from prior versions?</h2><span class="q">behavior delta</span></header>
+    <div class="body">
+      <table class="diff-table">
+        <tr><td>From version</td><td>{e(str(diff.get("from_version") or "—"))}</td></tr>
+        <tr><td>To version</td><td>{e(str(diff.get("to_version") or "—"))}</td></tr>
+        <tr><td>Risk delta</td><td><strong>{e(str(diff.get("risk_delta") or "—"))}</strong></td></tr>
+        <tr><td>New domains</td><td>{nd}</td></tr>
+        <tr><td>New ports</td><td>{np}</td></tr>
+      </table>
+    </div>
   </section>"""
 
-    # ── 9. Event counts ───────────────────────────────────────────────────────
-    count_rows = "".join(
-        f'<tr><td>{e(k.replace("_", " "))}</td><td>{v}</td></tr>\n'
-        for k, v in event_counts.items()
-    ) or '<tr><td colspan="2" class="muted">No events</td></tr>'
+    # ── 9. Event counts → stat-grid cells ────────────────────────────────────
+    stat_cells = ""
+    for k, v in event_counts.items():
+        zero_cls = " zero" if not v else ""
+        stat_cells += (
+            f'<div class="stat{zero_cls}">'
+            f'<div class="n">{v}</div>'
+            f'<div class="k">{e(k.replace("_"," "))}</div>'
+            f'</div>\n'
+        )
+    if not stat_cells:
+        stat_cells = '<div class="stat zero"><div class="n">0</div><div class="k">no events</div></div>'
 
     # ── 10. Raw artifact links ─────────────────────────────────────────────────
+    _file_ico = (
+        '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">'
+        '<path d="M3 2h6l4 4v8H3z"/><path d="M9 2v4h4"/></svg>'
+    )
     run_dir_str    = run_detail.get("run_dir", "")
     artifact_links = ""
     if run_dir_str:
@@ -808,10 +875,16 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
         ):
             fpath = Path(run_dir_str).resolve() / fname
             href  = fpath.as_uri()
-            exists_hint = "" if fpath.exists() else ' class="muted"'
-            artifact_links += (
-                f'<li{exists_hint}><a href="{e(href)}">{e(fname)}</a></li>\n'
-            )
+            if fpath.exists():
+                artifact_links += (
+                    f'<li>{_file_ico}<a href="{e(href)}">{e(fname)}</a></li>\n'
+                )
+            else:
+                artifact_links += (
+                    f'<li class="empty-art">{_file_ico}'
+                    f'<a href="{e(href)}">{e(fname)}</a>'
+                    f'<span class="badge">empty</span></li>\n'
+                )
 
     # ── metadata ───────────────────────────────────────────────────────────────
     hooks     = metadata.get("install_hooks") or []
@@ -825,194 +898,417 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
         susp   = "yes" if ph.get("any_suspicious") else "no"
         net    = "yes" if ph.get("network_activity") else "no"
         sens   = ph.get("sensitive_file_reads", 0)
-        phase_rows += (
-            f'<tr><td>{e(ph_name)}</td><td>{e(status)}</td>'
-            f'<td>{exit_c if exit_c is not None else "—"}</td>'
-            f'<td>{"%.1fs" % dur if dur is not None else "—"}</td>'
-            f'<td>{net}</td><td>{sens}</td><td>{susp}</td></tr>\n'
+        status_color = (
+            "var(--crit)" if status in ("failed","error") else
+            "var(--med)"  if status == "timed_out" else
+            "var(--muted)"
         )
+        phase_rows += (
+            f'<tr>'
+            f'<td>{_ptag(ph_name)}</td>'
+            f'<td style="color:{status_color}">{e(status)}</td>'
+            f'<td class="t-num">{exit_c if exit_c is not None else "—"}</td>'
+            f'<td class="t-num">{"%.1fs" % dur if dur is not None else "—"}</td>'
+            f'<td>{net}</td>'
+            f'<td class="t-num">{sens}</td>'
+            f'<td class="dim">{susp}</td></tr>\n'
+        )
+
+    # ── threat / meter ─────────────────────────────────────────────────────────
+    threat_cls  = _THREAT_CLASS.get(verdict_str, "likely")
+    active_zone = _meter_zone(score_val)
+    run_id      = run_detail.get("run_dir", "").rsplit("/", 1)[-1] or "—"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>pkgids report — {pkg_id}</title>
-  <style>
-    *,*::before,*::after{{box-sizing:border-box}}
-    body{{font-family:system-ui,sans-serif;margin:0;padding:0;
-          background:#f4f5f7;color:#222;font-size:14px}}
-    header{{background:#1a1a2e;color:#eee;padding:24px 32px}}
-    header h1{{margin:0 0 4px;font-size:.85rem;font-weight:400;
-               letter-spacing:.08em;color:#999;text-transform:uppercase}}
-    .pkg-id{{font-size:1.4rem;font-weight:700;margin-bottom:12px;
-              word-break:break-all}}
-    .badge{{display:inline-block;padding:4px 16px;border-radius:4px;
-             font-weight:700;font-size:.85rem;color:#fff;background:{vcolor};
-             text-transform:uppercase;letter-spacing:.08em}}
-    .score-row{{margin-top:12px;display:flex;align-items:center;gap:10px;
-                flex-wrap:wrap}}
-    .bar-bg{{background:#333;border-radius:4px;height:8px;width:200px}}
-    .bar-fg{{background:{vcolor};border-radius:4px;height:8px;width:{score_val}%}}
-    .score-label{{color:#ccc;font-size:.88rem}}
-    .conf{{color:#888;font-size:.80rem}}
-    main{{max-width:1100px;margin:0 auto;padding:20px 28px}}
-    section{{background:#fff;border-radius:6px;padding:18px 22px;
-              margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.07)}}
-    h2{{margin:0 0 12px;font-size:.92rem;color:#333;
-         border-bottom:1px solid #eee;padding-bottom:7px;font-weight:700}}
-    h2 .q{{color:#999;font-size:.78rem;font-weight:400;margin-left:6px}}
-    p{{margin:.4em 0;line-height:1.55;color:#333}}
-    .sev-chips{{margin-top:8px}}
-    .sev-chip{{display:inline-block;padding:2px 10px;border-radius:10px;
-               font-size:.75rem;font-weight:700;color:#fff;margin-right:4px}}
-    .sev-chip.critical{{background:#c0392b}}
-    .sev-chip.high{{background:#e67e22}}
-    .sev-chip.medium{{background:#f39c12}}
-    .sev-chip.low{{background:#2980b9}}
-    .chip{{display:inline-block;background:#e8eaf6;color:#3949ab;
-            border-radius:12px;padding:3px 12px;font-size:.78rem;
-            margin:2px;font-weight:600}}
-    .tech-row{{font-size:.78rem;color:#666;margin-top:8px}}
-    table{{width:100%;border-collapse:collapse;font-size:.82rem}}
-    th{{text-align:left;color:#666;font-weight:600;
-         border-bottom:2px solid #eee;padding:5px 7px}}
-    td{{padding:5px 7px;border-bottom:1px solid #f0f0f0;vertical-align:middle}}
-    tr:last-child td{{border-bottom:none}}
-    tr.combo-row td{{background:#fff8e1;font-style:italic;color:#7f6000}}
-    tr.total-row td{{background:#f8f8f8;font-weight:700;border-top:2px solid #ddd}}
-    .pts{{text-align:right;font-weight:600;color:#2c3e50;font-family:monospace}}
-    .sev{{display:inline-block;color:#fff;font-size:.68rem;font-weight:700;
-           padding:2px 7px;border-radius:3px;text-transform:uppercase}}
-    .phase-badge{{display:inline-block;color:#fff;font-size:.68rem;font-weight:700;
-                   padding:2px 7px;border-radius:3px;text-transform:uppercase}}
-    .ev{{color:#666;font-size:.75rem;max-width:260px;
-          overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-    code{{background:#f0f0f0;padding:1px 5px;border-radius:3px;
-           font-size:.82em;word-break:break-all}}
-    .muted{{color:#aaa}}
-    .meta{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}}
-    .meta-item label{{font-size:.72rem;color:#888;display:block;margin-bottom:2px}}
-    .meta-item span{{font-weight:600;font-size:.9rem}}
-    .pt-phase{{font-weight:700;font-size:.78rem;margin-top:10px;
-               letter-spacing:.04em;text-transform:uppercase}}
-    .pt-proc{{font-family:monospace;font-size:.78rem;color:#333;
-               padding:2px 0 2px 16px;white-space:pre-wrap;word-break:break-all}}
-    .corr-heading{{font-weight:600;font-size:.78rem;color:#555;
-                    margin-top:14px;border-top:1px dashed #ddd;padding-top:8px}}
-    .artifacts{{list-style:none;padding:0;margin:0}}
-    .artifacts li{{margin:4px 0}}
-    .artifacts a{{color:#3949ab;font-family:monospace;font-size:.82rem}}
-    .artifacts li.muted a{{color:#bbb}}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pkgids report — {pkg_id}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{{
+  --ink:#181b20;--ink-2:#41474f;--muted:#8a929c;--faint:#b7bdc5;
+  --line:#e5e8ec;--line-2:#eef0f3;--paper:#f5f6f8;--card:#ffffff;--tint:#f8f9fb;
+  --crit:#a51d1d;--crit-t:#fbecec;
+  --high:#b5560c;--high-t:#fbf0e6;
+  --med:#8a6410; --med-t:#faf3e1;
+  --low:#245e9e; --low-t:#eaf1f9;
+  --ok:#2c6e49;  --ok-t:#e8f2ec;
+  --vuln:#6d28d9;--vuln-t:#ede9fe;
+  --threat:var(--high);--threat-t:var(--high-t);
+  --shadow:0 1px 2px rgba(20,26,34,.04),0 1px 3px rgba(20,26,34,.06);
+}}
+body[data-threat="benign"]{{--threat:var(--ok);--threat-t:var(--ok-t)}}
+body[data-threat="suspicious"]{{--threat:var(--med);--threat-t:var(--med-t)}}
+body[data-threat="likely"]{{--threat:var(--high);--threat-t:var(--high-t)}}
+body[data-threat="malicious"]{{--threat:var(--crit);--threat-t:var(--crit-t)}}
+body[data-threat="vulnerable"]{{--threat:var(--vuln);--threat-t:var(--vuln-t)}}
+*,*::before,*::after{{box-sizing:border-box}}
+html{{-webkit-text-size-adjust:100%}}
+body{{margin:0;background:var(--paper);color:var(--ink);
+  font-family:"IBM Plex Sans",system-ui,sans-serif;
+  font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}}
+.mono{{font-family:"IBM Plex Mono",ui-monospace,monospace}}
+.sheet{{max-width:1040px;margin:0 auto;padding:0 26px 72px}}
+/* masthead */
+.masthead{{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
+  padding:26px 0 18px;border-bottom:1px solid var(--line);flex-wrap:wrap}}
+.brand{{display:flex;align-items:center;gap:11px}}
+.brand .glyph{{width:30px;height:30px;border-radius:7px;flex:none;
+  background:var(--ink);color:#fff;display:grid;place-items:center;
+  font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:15px}}
+.brand .wordmark{{font-family:"IBM Plex Mono",monospace;font-weight:600;
+  font-size:15px;letter-spacing:.02em}}
+.brand .tagline{{font-size:12px;color:var(--muted);letter-spacing:.02em;margin-top:1px}}
+.run-meta{{text-align:right;font-size:12px;color:var(--muted);line-height:1.7}}
+.run-meta b{{color:var(--ink-2);font-weight:600}}
+/* hero */
+.hero{{display:grid;grid-template-columns:1.55fr 1fr;gap:0;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  margin-top:22px;box-shadow:var(--shadow);overflow:hidden}}
+.hero-main{{padding:26px 28px 24px;border-left:4px solid var(--threat)}}
+.eyebrow{{font-family:"IBM Plex Mono",monospace;font-size:11px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}}
+.pkg-id{{font-family:"IBM Plex Mono",monospace;font-size:15px;color:var(--ink-2);
+  word-break:break-all;margin-bottom:18px}}
+.pkg-id .eco{{color:var(--muted)}}
+.verdict-flag{{display:flex;align-items:center;gap:12px;margin-bottom:14px}}
+.threat-dot{{width:12px;height:12px;border-radius:50%;flex:none;background:var(--threat);
+  box-shadow:0 0 0 4px var(--threat-t)}}
+.verdict-label{{font-size:26px;font-weight:700;letter-spacing:-.01em;line-height:1.1;color:var(--ink)}}
+.verdict-basis{{font-size:12.5px;color:var(--muted);margin-top:2px}}
+.verdict-summary{{font-size:14.5px;color:var(--ink-2);margin:0 0 20px;max-width:56ch}}
+.verdict-summary b{{color:var(--ink);font-weight:600}}
+.facts{{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;
+  background:var(--line-2);border:1px solid var(--line-2);border-radius:8px;overflow:hidden}}
+.fact{{background:var(--card);padding:10px 13px}}
+.fact label{{display:block;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:3px;font-weight:500}}
+.fact span{{font-size:14px;font-weight:600;color:var(--ink)}}
+/* score panel */
+.hero-score{{padding:26px 26px 24px;background:var(--tint);
+  display:flex;flex-direction:column;gap:18px;border-left:1px solid var(--line)}}
+.score-num{{display:flex;align-items:baseline;gap:8px}}
+.score-num .big{{font-family:"IBM Plex Mono",monospace;font-size:44px;font-weight:600;
+  line-height:1;color:var(--threat);letter-spacing:-.02em}}
+.score-num .den{{font-family:"IBM Plex Mono",monospace;font-size:18px;color:var(--faint)}}
+.score-num .cap{{margin-left:auto;font-size:11px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--muted);text-align:right;line-height:1.5}}
+.score-num .cap b{{display:block;color:var(--ink-2);font-size:13px;font-weight:600;
+  letter-spacing:0;text-transform:none}}
+.meter{{margin-top:2px}}
+.meter-track{{display:flex;height:8px;border-radius:5px;overflow:hidden;gap:2px}}
+.meter-track i{{flex:1;opacity:.28}}
+.meter-track i.z1{{background:var(--ok)}}
+.meter-track i.z2{{background:var(--med)}}
+.meter-track i.z3{{background:var(--high)}}
+.meter-track i.z4{{background:var(--crit)}}
+.meter-track i.on{{opacity:1}}
+.meter-scale{{position:relative;height:16px;margin-top:7px}}
+.meter-needle{{position:absolute;top:-14px;width:2px;height:15px;background:var(--ink);
+  transform:translateX(-1px)}}
+.meter-needle::after{{content:"";position:absolute;top:-4px;left:-3px;width:8px;height:8px;
+  border-radius:50%;background:var(--ink)}}
+.meter-labels{{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);
+  font-family:"IBM Plex Mono",monospace;letter-spacing:.02em}}
+.sev-legend{{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;padding-top:16px;
+  border-top:1px solid var(--line)}}
+.sev-legend .item{{display:flex;align-items:center;gap:6px;color:var(--ink-2)}}
+.sev-legend .item b{{font-family:"IBM Plex Mono",monospace;font-weight:600}}
+.sev-legend .dot{{width:8px;height:8px;border-radius:2px;flex:none}}
+.sev-legend .item.zero{{color:var(--faint)}}
+.sev-legend .item.zero .dot{{background:var(--faint)!important}}
+/* sections */
+main{{counter-reset:sec}}
+.section{{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  margin-top:16px;box-shadow:var(--shadow);overflow:hidden;break-inside:avoid}}
+.section>header{{display:flex;align-items:baseline;gap:12px;padding:16px 24px 14px;
+  border-bottom:1px solid var(--line-2)}}
+.section>header::before{{counter-increment:sec;content:counter(sec,decimal-leading-zero);
+  font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;color:var(--threat);
+  letter-spacing:.04em}}
+.section>header h2{{margin:0;font-size:15px;font-weight:600;letter-spacing:-.005em;color:var(--ink)}}
+.section>header .q{{margin-left:auto;font-size:11.5px;color:var(--muted);
+  font-family:"IBM Plex Mono",monospace;letter-spacing:.02em}}
+.body{{padding:18px 24px 22px}}
+.lead{{font-size:14.5px;color:var(--ink-2);margin:0 0 4px;max-width:70ch}}
+p{{margin:.4em 0;line-height:1.55;color:var(--ink-2)}}
+/* verdict breakdown layers */
+.layers{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:6px}}
+.layer{{border:1px solid var(--line);border-radius:9px;padding:13px 15px;background:var(--tint)}}
+.layer.final{{border-color:var(--threat);background:var(--threat-t)}}
+.layer label{{display:block;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:7px;font-weight:600}}
+.layer .val{{font-size:15px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:7px}}
+.layer .note{{font-size:11.5px;color:var(--muted);margin-top:5px}}
+.mini-dot{{width:8px;height:8px;border-radius:50%;flex:none}}
+.basis-row{{font-size:12.5px;color:var(--muted);margin-top:14px;display:flex;gap:22px;flex-wrap:wrap}}
+.basis-row span b{{color:var(--ink-2);font-weight:600}}
+/* tables */
+table{{width:100%;border-collapse:collapse;font-size:13.5px}}
+thead th{{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);font-weight:600;padding:0 12px 8px;border-bottom:1px solid var(--line)}}
+tbody td{{padding:11px 12px;border-bottom:1px solid var(--line-2);vertical-align:middle;color:var(--ink-2)}}
+tbody tr:last-child td{{border-bottom:none}}
+td:first-child,th:first-child{{padding-left:2px}}
+td:last-child,th:last-child{{padding-right:2px}}
+.t-num{{text-align:right;font-family:"IBM Plex Mono",monospace;color:var(--ink);font-weight:500}}
+.finding{{color:var(--ink);font-weight:500}}
+.combo-row td{{background:var(--med-t);font-style:italic;color:var(--med)}}
+.total-row td{{border-top:1.5px solid var(--line);padding-top:13px;color:var(--ink);font-weight:600}}
+.total-row .t-num{{font-size:15px;color:var(--threat);font-weight:600}}
+.dim{{color:var(--muted)}}
+.empty{{color:var(--faint);font-style:normal;padding:14px 2px}}
+/* severity pills */
+.pill{{display:inline-flex;align-items:center;gap:5px;font-family:"IBM Plex Mono",monospace;
+  font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 9px 3px 7px;border-radius:20px;border:1px solid transparent;white-space:nowrap}}
+.pill::before{{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}}
+.pill.critical{{color:var(--crit);background:var(--crit-t)}}
+.pill.high{{color:var(--high);background:var(--high-t)}}
+.pill.medium{{color:var(--med);background:var(--med-t)}}
+.pill.low{{color:var(--low);background:var(--low-t)}}
+/* phase tags */
+.ptag{{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:500;
+  letter-spacing:.04em;padding:2px 8px;border-radius:5px;border:1px solid var(--line);color:var(--ink-2)}}
+.ptag.install{{color:#6b3fa0;border-color:#e5daf2;background:#f7f2fc}}
+.ptag.import{{color:#1f6f8b;border-color:#d5e9ef;background:#eff7fa}}
+code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(--tint);
+  border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:var(--ink-2);word-break:break-all}}
+.ev{{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);
+  max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+/* ATT&CK */
+.tactic-row{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}}
+.tactic{{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;
+  color:var(--ink-2);background:var(--tint);border:1px solid var(--line);border-radius:7px;padding:6px 12px}}
+.tactic .k{{font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--muted);letter-spacing:.03em}}
+.tech-row{{display:flex;flex-wrap:wrap;gap:7px;align-items:center;font-size:12px;color:var(--muted)}}
+.tech-row .lbl{{font-family:"IBM Plex Mono",monospace;letter-spacing:.04em}}
+/* process tree */
+.phase-group{{margin-bottom:14px}}
+.phase-group:last-child{{margin-bottom:0}}
+.phase-head{{display:flex;align-items:center;gap:9px;margin-bottom:8px}}
+.phase-head .name{{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2)}}
+.phase-head .rule{{flex:1;height:1px;background:var(--line-2)}}
+.proc-line{{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-2);
+  padding:2px 0 2px 20px;white-space:pre-wrap;word-break:break-all}}
+.proc-empty{{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--faint);
+  padding-left:18px;position:relative}}
+.proc-empty::before{{content:"└";position:absolute;left:2px;color:var(--line)}}
+.corr-heading{{font-weight:600;font-size:12px;color:var(--ink-2);
+  margin-top:14px;border-top:1px dashed var(--line);padding-top:8px}}
+/* stat grid */
+.stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:1px;
+  background:var(--line-2);border:1px solid var(--line-2);border-radius:9px;overflow:hidden}}
+.stat{{background:var(--card);padding:14px 12px;text-align:center}}
+.stat .n{{font-family:"IBM Plex Mono",monospace;font-size:22px;font-weight:600;color:var(--ink)}}
+.stat.zero .n{{color:var(--faint)}}
+.stat .k{{font-size:10.5px;color:var(--muted);margin-top:3px;letter-spacing:.02em;line-height:1.3}}
+/* artifacts */
+.arts{{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:1fr 1fr;gap:2px 24px}}
+.arts li{{display:flex;align-items:center;gap:9px;padding:7px 2px;border-bottom:1px solid var(--line-2)}}
+.ico{{width:15px;height:15px;flex:none;color:var(--muted)}}
+.arts a{{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-2);
+  text-decoration:none;font-weight:500}}
+.arts a:hover{{color:var(--threat);text-decoration:underline}}
+.arts li.empty-art a{{color:var(--faint)}}
+.arts .badge{{margin-left:auto;font-size:10px;font-family:"IBM Plex Mono",monospace;
+  color:var(--faint);letter-spacing:.04em}}
+/* diff */
+.diff-table td:first-child{{font-weight:600;color:var(--ink-2);width:130px}}
+/* footer */
+.report-footer{{display:flex;justify-content:space-between;align-items:center;gap:16px;
+  margin-top:26px;padding-top:16px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--muted);font-family:"IBM Plex Mono",monospace;flex-wrap:wrap}}
+@media(max-width:820px){{
+  .hero{{grid-template-columns:1fr}}
+  .hero-score{{border-left:none;border-top:1px solid var(--line)}}
+  .layers{{grid-template-columns:1fr}}
+  .stat-grid{{grid-template-columns:repeat(4,1fr)}}
+  .facts{{grid-template-columns:repeat(2,1fr)}}
+  .arts{{grid-template-columns:1fr}}
+}}
+@page{{size:A4;margin:14mm}}
+@media print{{
+  body{{background:#fff;font-size:11px}}
+  .sheet{{max-width:none;padding:0}}
+  .section,.hero{{box-shadow:none;break-inside:avoid}}
+}}
+</style>
 </head>
-<body>
-<header>
-  <h1>pkgids security report</h1>
-  <div class="pkg-id">{pkg_id}</div>
-  <div class="badge">{e(verdict_label)}</div>
-  <div class="score-row">
-    <div class="bar-bg"><div class="bar-fg"></div></div>
-    <span class="score-label">score: {score_val}/100</span>
-    <span class="conf">confidence: {confidence:.2f}</span>
+<body data-threat="{threat_cls}">
+<div class="sheet">
+
+<header class="masthead">
+  <div class="brand">
+    <div class="glyph">&#9670;</div>
+    <div>
+      <div class="wordmark">pkgids</div>
+      <div class="tagline">package install &amp; behavior analysis</div>
+    </div>
+  </div>
+  <div class="run-meta">
+    <div>run <b>{e(run_id)}</b></div>
+    <div>engine v0.1.0 &middot; sandbox trace</div>
   </div>
 </header>
+
+<section class="hero">
+  <div class="hero-main">
+    <div class="eyebrow">Verdict</div>
+    <div class="pkg-id"><span class="eco">{e(eco)}:</span>{e(name)}<b>@{e(version)}</b></div>
+    <div class="verdict-flag">
+      <span class="threat-dot"></span>
+      <div>
+        <div class="verdict-label">{e(verdict_str.replace("_"," ").title())}</div>
+        <div class="verdict-basis">{e(basis_desc)}</div>
+      </div>
+    </div>
+    <p class="verdict-summary">{verdict_summary}</p>
+    <div class="facts">
+      <div class="fact"><label>Ecosystem</label><span>{e(eco.title())}</span></div>
+      <div class="fact"><label>Package</label><span>{e(name)}</span></div>
+      <div class="fact"><label>Version</label><span class="mono">{e(version)}</span></div>
+      <div class="fact"><label>Indicators</label><span class="mono">{summary.get("indicator_count",0)}</span></div>
+      <div class="fact"><label>Install hook</label><span>{hooks_str}</span></div>
+      <div class="fact"><label>Files in artifact</label><span class="mono">{file_cnt}</span></div>
+    </div>
+  </div>
+  <aside class="hero-score">
+    <div>
+      <div class="score-num">
+        <span class="big">{score_val}</span><span class="den">/100</span>
+        <span class="cap">threat score<b>{e(verdict_str.replace("_"," ").title())} band</b></span>
+      </div>
+      <div class="meter">
+        <div class="meter-track">
+          <i class="z1{' on' if active_zone=='z1' else ''}"></i>
+          <i class="z2{' on' if active_zone=='z2' else ''}"></i>
+          <i class="z3{' on' if active_zone=='z3' else ''}"></i>
+          <i class="z4{' on' if active_zone=='z4' else ''}"></i>
+        </div>
+        <div class="meter-scale"><div class="meter-needle" style="left:{score_val}%"></div></div>
+        <div class="meter-labels"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="score-num" style="margin-bottom:2px">
+        <span class="cap" style="margin-left:0;text-align:left">confidence</span>
+        <span class="mono" style="margin-left:auto;font-size:20px;font-weight:600;color:var(--ink)">{confidence:.2f}</span>
+      </div>
+    </div>
+    <div class="sev-legend">
+      {sev_legend}
+    </div>
+  </aside>
+</section>
+
 <main>
 
-  <section>
-    <h2>What happened? <span class="q">executive summary</span></h2>
-    {narrative_html}
-    <div class="sev-chips">{sev_chips}</div>
-    <div style="margin-top:10px" class="meta">
-      <div class="meta-item"><label>Ecosystem</label><span>{e(eco)}</span></div>
-      <div class="meta-item"><label>Package</label><span>{e(name)}</span></div>
-      <div class="meta-item"><label>Version</label><span>{e(version)}</span></div>
-      <div class="meta-item"><label>Indicators</label>
-        <span>{summary.get("indicator_count",0)}</span></div>
-      <div class="meta-item"><label>Install hooks</label><span>{hooks_str}</span></div>
-      <div class="meta-item"><label>Files in artifact</label><span>{file_cnt}</span></div>
+{advisory_section}
+
+  <section class="section">
+    <header><h2>Score breakdown</h2><span class="q">why this verdict</span></header>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>Severity</th><th>Finding</th><th>Tactic</th><th>Phase</th><th class="t-num">Points</th>
+        </tr></thead>
+        <tbody>{bd_rows}</tbody>
+      </table>
     </div>
   </section>
-  {advisory_section}
-  <section>
-    <h2>Why was this verdict assigned? <span class="q">score breakdown</span></h2>
-    <table>
-      <thead><tr>
-        <th>Severity</th><th>Finding</th><th>Tactic</th><th>Phase</th><th>Points</th>
-      </tr></thead>
-      <tbody>{bd_rows}</tbody>
-    </table>
+
+  <section class="section">
+    <header><h2>ATT&amp;CK mapping</h2><span class="q">tactics &amp; techniques</span></header>
+    <div class="body">
+      <div class="tactic-row">{tactic_chips}</div>
+      {tech_row}
+    </div>
   </section>
 
-  <section>
-    <h2>ATT&amp;CK Tactics</h2>
-    {tactic_chips}
-    {tech_row}
+  <section class="section">
+    <header><h2>Indicators</h2><span class="q">detailed findings</span></header>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>Sev</th><th>Indicator</th><th>Technique</th>
+          <th>Tactic</th><th>Phase</th><th>Evidence</th>
+        </tr></thead>
+        <tbody>{ind_rows}</tbody>
+      </table>
+    </div>
   </section>
 
-  <section>
-    <h2>What were the indicators?</h2>
-    <table>
-      <thead><tr>
-        <th>Sev</th><th>Indicator</th><th>Technique</th>
-        <th>Tactic</th><th>Phase</th><th>Evidence</th>
-      </tr></thead>
-      <tbody>{ind_rows}</tbody>
-    </table>
+  <section class="section">
+    <header><h2>Process tree</h2><span class="q">by phase</span></header>
+    <div class="body">
+      {proc_html if proc_html else '<span class="dim">No phase data</span>'}
+    </div>
   </section>
 
-  <section>
-    <h2>In which phase did it happen? <span class="q">process tree</span></h2>
-    {proc_html if proc_html else '<span class="muted">No phase data</span>'}
+  <section class="section">
+    <header><h2>Network activity</h2><span class="q">hosts &amp; domains contacted</span></header>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>Domain / Host</th><th>Protocol</th><th>Initiated by</th>
+        </tr></thead>
+        <tbody>{domain_rows}</tbody>
+      </table>
+    </div>
   </section>
 
-  <section>
-    <h2>Which host or domain was contacted?</h2>
-    <table>
-      <thead><tr>
-        <th>Domain / Host</th><th>Protocol</th><th>Initiated by</th>
-      </tr></thead>
-      <tbody>{domain_rows}</tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2>Which file or secret was touched?</h2>
-    <table>
-      <thead><tr>
-        <th>Path</th><th>Mode</th><th>Flags</th>
-      </tr></thead>
-      <tbody>{sens_rows}</tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2>Phase Summary</h2>
-    <table>
-      <thead><tr>
-        <th>Phase</th><th>Status</th><th>Exit</th><th>Duration</th>
-        <th>Network</th><th>Sensitive reads</th><th>Suspicious</th>
-      </tr></thead>
-      <tbody>{phase_rows if phase_rows else
-              '<tr><td colspan="7" class="muted">No phase data</td></tr>'}</tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2>Event Counts</h2>
-    <table>
-      <thead><tr><th>Event type</th><th>Count</th></tr></thead>
-      <tbody>{count_rows}</tbody>
-    </table>
+  <section class="section">
+    <header><h2>Sensitive file access</h2><span class="q">files &amp; secrets touched</span></header>
+    <div class="body">
+      <table>
+        <thead><tr><th>Path</th><th>Mode</th><th>Flags</th></tr></thead>
+        <tbody>{sens_rows}</tbody>
+      </table>
+    </div>
   </section>
   {diff_section}
-  <section>
-    <h2>Raw Artifacts</h2>
-    {f'<ul class="artifacts">{artifact_links}</ul>'
-      if artifact_links else '<span class="muted">Run directory not available</span>'}
+  <section class="section">
+    <header><h2>Phase summary</h2><span class="q">execution lifecycle</span></header>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>Phase</th><th>Status</th><th class="t-num">Exit</th><th class="t-num">Duration</th>
+          <th>Network</th><th class="t-num">Sensitive reads</th><th>Suspicious</th>
+        </tr></thead>
+        <tbody>{phase_rows if phase_rows else
+                '<tr><td colspan="7" class="empty">No phase data</td></tr>'}</tbody>
+      </table>
+    </div>
   </section>
 
+  <section class="section">
+    <header><h2>Event counts</h2><span class="q">raw telemetry volume</span></header>
+    <div class="body">
+      <div class="stat-grid">{stat_cells}</div>
+    </div>
+  </section>
+
+  <section class="section">
+    <header><h2>Raw artifacts</h2><span class="q">run {e(run_id)}</span></header>
+    <div class="body">
+      {f'<ul class="arts">{artifact_links}</ul>'
+        if artifact_links else '<span class="dim">Run directory not available</span>'}
+    </div>
+  </section>
+
+  <footer class="report-footer">
+    <span>pkgids &middot; package install &amp; behavior analysis</span>
+    <span>generated {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</span>
+  </footer>
+
 </main>
+</div>
 </body>
 </html>"""
 
