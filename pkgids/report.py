@@ -806,7 +806,7 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
             "behavior_profile.json", "diff.json", "correlations.json",
             "report.json", "capture.pcap",
         ):
-            fpath = Path(run_dir_str) / fname
+            fpath = Path(run_dir_str).resolve() / fname
             href  = fpath.as_uri()
             exists_hint = "" if fpath.exists() else ' class="muted"'
             artifact_links += (
