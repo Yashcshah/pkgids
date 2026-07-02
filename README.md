@@ -85,10 +85,10 @@ See [architecture.md](architecture.md) for the full system diagram.
 
 7. **Advisory enrichment** - fetch.py queries OSV.dev for known advisories affecting the package name and version. The normalized result (hit, count, IDs, summaries, error) is stored in metadata.json alongside the artifact and surfaced in the report. If the OSV lookup fails or times out the run continues; advisory_error records the reason.
 
-8. **Verdict** - three distinct verdict fields appear in every report:
-   - `dynamic_verdict` — behavioral evidence only, from the additive scoring model: `no_malicious_behavior_observed` (score=0) / `low_risk` (1–24) / `suspicious` (25–49) / `likely_malicious` (50–74) / `malicious` (75–100). **No dynamic signal does not mean safe.**
-   - `advisory` — normalized OSV advisory summary.
-   - `verdict` (final) — analyst-facing combined verdict. Advisory hits elevate packages with no or low dynamic signal to `known_vulnerable`. Dynamic signals at suspicious or above are preserved; advisory corroboration is noted in `verdict_basis` ("both").
+8. **Verdict** - three explicitly separated verdict fields appear in every report:
+   - `behavioral_verdict` — runtime evidence only, from the additive scoring model: `no_malicious_behavior_observed` (score=0) / `low_risk` (1–24) / `suspicious` (25–49) / `likely_malicious` (50–74) / `malicious` (75–100). **No dynamic signal does not mean safe.**
+   - `advisory_status` — advisory-only status: `none` (OSV found nothing) / `advisory_hit` (one or more advisories matched this version) / `lookup_failed` (query timed out or errored).
+   - `final_verdict` / `verdict` — analyst-facing combined verdict. Advisory hits elevate packages with no or low dynamic signal to `known_vulnerable`; dynamic signals at `suspicious` or above are preserved and `verdict_basis` is set to `"both"`.
 
 ---
 
@@ -340,46 +340,49 @@ pkgids validate --local-artifacts data/corpus_samples.csv
 
 ## Verdict Reference
 
-### Dynamic behavioral verdict (`dynamic_verdict`)
+Every report contains three explicitly separated verdict fields:
 
-Derived from the additive scoring model in `score.py`. Based solely on what the sandbox observed at runtime.
+### Behavioral verdict (`behavioral_verdict`)
 
-| Verdict | Score | Meaning |
-|---------|-------|---------|
+Derived solely from sandbox runtime evidence via the additive scoring model in `score.py`.
+
+| Value | Score | Meaning |
+|-------|-------|---------|
 | `no_malicious_behavior_observed` | 0 | No indicators detected. **Does not mean the package is safe** — only that this run observed nothing suspicious. |
 | `low_risk` | 1–24 | Weak signals detected but below the suspicious threshold. |
 | `suspicious` | 25–49 | Meaningful behavioral signal; warrants closer review. |
 | `likely_malicious` | 50–74 | High-confidence behavioral evidence of malicious intent. |
 | `malicious` | 75–100 | Strong multi-indicator evidence of malicious behavior. |
 
-### Advisory intelligence (`advisory`)
+### Advisory status (`advisory_status`)
 
-Queried from OSV.dev at fetch time. Normalized to six fields:
-- `advisory_hit` — True if one or more advisories matched this package version
-- `advisory_source` — "osv" on success, null if the lookup failed
-- `advisory_count` — number of matching advisories
-- `advisory_ids` — OSV IDs, CVEs, and GHSA aliases
-- `advisory_summaries` — short human-readable descriptions (truncated to 200 chars each)
-- `advisory_error` — error message if the lookup failed, else null
+Derived solely from the OSV.dev query performed at fetch time.
 
-If the OSV lookup times out or fails the run still completes; only `advisory_error` is set.
+| Value | Meaning |
+|-------|---------|
+| `none` | OSV query succeeded but no advisories matched this package version. |
+| `advisory_hit` | One or more OSV advisories matched this package version. |
+| `lookup_failed` | The OSV query timed out or errored; `advisory.advisory_error` has the reason. |
 
-### Final analyst verdict (`verdict`)
+The `advisory` field in the report contains the full normalized OSV result:
+`advisory_hit`, `advisory_source`, `advisory_count`, `advisory_ids`, `advisory_summaries`, `advisory_error`.
 
-Combines dynamic verdict and advisory intelligence:
+### Final verdict (`final_verdict` / `verdict`)
 
-| Dynamic verdict | Advisory hit | Final verdict | Basis |
-|----------------|-------------|---------------|-------|
-| `no_malicious_behavior_observed` | yes | `known_vulnerable` | advisory |
-| `low_risk` | yes | `known_vulnerable` | advisory |
-| `suspicious` | yes | `suspicious` | both |
-| `likely_malicious` | yes | `likely_malicious` | both |
-| `malicious` | yes | `malicious` | both |
-| any | no | (same as dynamic) | dynamic |
+Combines `behavioral_verdict` and `advisory_status`. `verdict` is a backward-compatible alias for `final_verdict`.
+
+| `behavioral_verdict` | `advisory_status` | `final_verdict` | `verdict_basis` |
+|---------------------|------------------|-----------------|-----------------|
+| `no_malicious_behavior_observed` | `advisory_hit` | `known_vulnerable` | `advisory` |
+| `low_risk` | `advisory_hit` | `known_vulnerable` | `advisory` |
+| `suspicious` | `advisory_hit` | `suspicious` | `both` |
+| `likely_malicious` | `advisory_hit` | `likely_malicious` | `both` |
+| `malicious` | `advisory_hit` | `malicious` | `both` |
+| any | `none` or `lookup_failed` | (same as behavioral) | `dynamic` |
 
 Advisory intelligence can only escalate, never lower, the final verdict.
 
-> **Note on bin-collection:** CVE-2022-34501 wording is inconsistent across sources ("before v0.1" vs "versions including 0.1"). pkgids faithfully reports whatever OSV.dev returns at query time. A `no_malicious_behavior_observed` dynamic verdict for bin-collection 0.1 does not rule out malicious intent — the sandbox may not have triggered the payload. Check `advisory_hit` in the report for current advisory status.
+> **Note on bin-collection:** CVE-2022-34501 wording is inconsistent across sources ("before v0.1" vs "versions including 0.1"). pkgids faithfully reports whatever OSV.dev returns at query time. A `behavioral_verdict` of `no_malicious_behavior_observed` for bin-collection 0.1 does not rule out malicious intent — the sandbox may not have triggered the payload. Check `advisory_status` in the report for current OSV coverage.
 
 ---
 

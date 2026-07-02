@@ -512,12 +512,16 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 1
 
     # Print terse summary
-    run     = result.get("run", {})
-    verdict = result.get("verdict", "unknown")
-    score   = result.get("score", 0.0)
-    n_ind   = result.get("summary", {}).get("indicator_count", 0)
-    tactics = ", ".join(result.get("tactics", [])) or "none"
-    print(f"{'verdict':<12} {verdict}")
+    run                = result.get("run", {})
+    verdict            = result.get("verdict", "unknown")
+    behavioral_verdict = result.get("behavioral_verdict", verdict)
+    advisory_status    = result.get("advisory_status", "none")
+    score              = result.get("score", 0.0)
+    n_ind              = result.get("summary", {}).get("indicator_count", 0)
+    tactics            = ", ".join(result.get("tactics", [])) or "none"
+    print(f"{'behavioral':<12} {behavioral_verdict}")
+    print(f"{'advisory':<12} {advisory_status}")
+    print(f"{'final_verdict':<12} {verdict}")
     print(f"{'score':<12} {score:.3f}")
     print(f"{'confidence':<12} {result.get('confidence', 'none')}")
     print(f"{'indicators':<12} {n_ind}")

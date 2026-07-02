@@ -315,7 +315,21 @@ _BELOW_SUSPICIOUS: frozenset[str] = frozenset({
 })
 
 
-def _combine_verdicts(dynamic_verdict: str, advisory_hit: bool) -> tuple[str, str]:
+def _advisory_status(advisory: dict) -> str:
+    """Summarise advisory enrichment as a single status string.
+
+    "none"         — OSV query succeeded but no advisories matched this version
+    "advisory_hit" — OSV returned one or more matching advisories
+    "lookup_failed" — the OSV query failed or timed out (advisory_error is set)
+    """
+    if advisory.get("advisory_error"):
+        return "lookup_failed"
+    if advisory.get("advisory_hit"):
+        return "advisory_hit"
+    return "none"
+
+
+def _combine_verdicts(behavioral_verdict: str, advisory_hit: bool) -> tuple[str, str]:
     """Return (final_verdict, verdict_basis).
 
     verdict_basis is one of: "dynamic" | "advisory" | "both"
@@ -325,13 +339,13 @@ def _combine_verdicts(dynamic_verdict: str, advisory_hit: bool) -> tuple[str, st
     - low risk  + advisory hit → "known_vulnerable"   (basis: "advisory")
     - suspicious+ advisory hit → "suspicious"         (basis: "both")
     - higher    + advisory hit → unchanged            (basis: "both")
-    - no advisory hit          → dynamic verdict      (basis: "dynamic")
+    - no advisory hit          → behavioral verdict   (basis: "dynamic")
     """
     if not advisory_hit:
-        return dynamic_verdict, "dynamic"
-    if dynamic_verdict in _BELOW_SUSPICIOUS:
+        return behavioral_verdict, "dynamic"
+    if behavioral_verdict in _BELOW_SUSPICIOUS:
         return "known_vulnerable", "advisory"
-    return dynamic_verdict, "both"
+    return behavioral_verdict, "both"
 
 
 def build_report(normalized: dict) -> dict:
@@ -339,11 +353,13 @@ def build_report(normalized: dict) -> dict:
 
     Score is an additive integer in [0, 100]; confidence is a float in [0, 1].
 
-    Three verdict fields are present in the output:
-        dynamic_verdict — behavioral evidence only (from score model)
-        advisory        — normalized OSV advisory summary
-        verdict         — final analyst-facing verdict combining both sources
-        verdict_basis   — "dynamic" | "advisory" | "both"
+    Three explicitly separated verdict fields are present in the output:
+
+        behavioral_verdict — runtime evidence only (install/import/telemetry/network)
+        advisory_status    — advisory-only status: "none" | "advisory_hit" | "lookup_failed"
+        final_verdict      — combined analyst-facing verdict
+        verdict            — alias for final_verdict (backward compat)
+        verdict_basis      — how final_verdict was derived: "dynamic" | "advisory" | "both"
     """
     from .indicators import extract_indicators
     from .score import (
@@ -353,15 +369,16 @@ def build_report(normalized: dict) -> dict:
         score_breakdown as _breakdown,
     )
 
-    indicators      = extract_indicators(normalized)
-    malice_score    = _score(indicators)
-    dynamic_verdict = _verdict(malice_score)
-    conf_val        = _conf(indicators)
-    breakdown       = _breakdown(indicators)
+    indicators          = extract_indicators(normalized)
+    malice_score        = _score(indicators)
+    behavioral_verdict  = _verdict(malice_score)
+    conf_val            = _conf(indicators)
+    breakdown           = _breakdown(indicators)
 
-    advisory = normalized.get("advisory") or {}
+    advisory     = normalized.get("advisory") or {}
+    adv_status   = _advisory_status(advisory)
     advisory_hit = bool(advisory.get("advisory_hit"))
-    final_verdict, verdict_basis = _combine_verdicts(dynamic_verdict, advisory_hit)
+    final_verdict, verdict_basis = _combine_verdicts(behavioral_verdict, advisory_hit)
 
     raw_tactics    = sorted({i["tactic"] for i in indicators})
     attack_tactics = [_format_tactic(t) for t in raw_tactics]
@@ -392,11 +409,13 @@ def build_report(normalized: dict) -> dict:
             "name":      run.get("name"),
             "version":   run.get("version"),
         },
-        # three-layer verdict (see module docstring)
-        "verdict":         final_verdict,
-        "dynamic_verdict": dynamic_verdict,
-        "verdict_basis":   verdict_basis,
-        "advisory":        advisory,
+        # three explicitly separated verdict layers
+        "behavioral_verdict": behavioral_verdict,
+        "advisory_status":    adv_status,
+        "final_verdict":      final_verdict,
+        "verdict":            final_verdict,   # backward-compat alias
+        "verdict_basis":      verdict_basis,
+        "advisory":           advisory,
         "score":           malice_score,
         "confidence":      conf_val,
         "attack_tactics":  attack_tactics,
@@ -467,7 +486,9 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
 
     pkg             = report_dict.get("package") or report_dict.get("_run") or {}
     verdict_str     = report_dict.get("verdict", "unknown")
-    dynamic_verdict = report_dict.get("dynamic_verdict", verdict_str)
+    behavioral_verdict = report_dict.get("behavioral_verdict",
+                            report_dict.get("dynamic_verdict", verdict_str))
+    adv_status      = report_dict.get("advisory_status", "none")
     verdict_basis   = report_dict.get("verdict_basis", "dynamic")
     advisory        = report_dict.get("advisory") or {}
     score_val       = int(report_dict.get("score", 0))
@@ -507,12 +528,23 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
     adv_err    = advisory.get("advisory_error")
     adv_ids    = advisory.get("advisory_ids") or []
     adv_sums   = advisory.get("advisory_summaries") or []
-    dv_color   = _VERDICT_COLOR.get(dynamic_verdict, "#7f8c8d")
+    bv_color   = _VERDICT_COLOR.get(behavioral_verdict, "#7f8c8d")
+    fv_color   = _VERDICT_COLOR.get(verdict_str, "#7f8c8d")
     basis_desc = {
         "dynamic":  "behavioral evidence only",
         "advisory": "advisory intelligence (no runtime trigger observed)",
         "both":     "behavioral evidence + advisory intelligence",
     }.get(verdict_basis, verdict_basis)
+    adv_status_label = {
+        "none":         "None",
+        "advisory_hit": "HIT",
+        "lookup_failed": "LOOKUP FAILED",
+    }.get(adv_status, adv_status.upper())
+    adv_status_color = {
+        "none":         "#27ae60",
+        "advisory_hit": "#c0392b",
+        "lookup_failed": "#e67e22",
+    }.get(adv_status, "#7f8c8d")
 
     adv_id_cells = "".join(
         f'<tr><td><code>{e(i)}</code></td>'
@@ -522,18 +554,21 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
 
     advisory_section = f"""
   <section>
-    <h2>Advisory Intelligence <span class="q">OSV.dev lookup</span></h2>
+    <h2>Verdict Breakdown <span class="q">Three-layer analysis</span></h2>
     <div class="meta" style="margin-bottom:12px">
-      <div class="meta-item"><label>Advisory hit</label>
-        <span style="color:{'#c0392b' if adv_hit else '#27ae60'};font-weight:700">
-          {'YES' if adv_hit else 'no'}</span></div>
-      <div class="meta-item"><label>Source</label><span>{e(adv_src)}</span></div>
-      <div class="meta-item"><label>Advisory count</label><span>{adv_count}</span></div>
-      <div class="meta-item"><label>Dynamic verdict</label>
-        <span style="color:{dv_color};font-weight:700">
-          {e(dynamic_verdict.replace('_',' ').upper())}</span></div>
+      <div class="meta-item"><label>Behavioral verdict</label>
+        <span style="color:{bv_color};font-weight:700">
+          {e(behavioral_verdict.replace('_',' ').upper())}</span></div>
+      <div class="meta-item"><label>Advisory status</label>
+        <span style="color:{adv_status_color};font-weight:700">
+          {e(adv_status_label)}</span></div>
+      <div class="meta-item"><label>Final verdict</label>
+        <span style="color:{fv_color};font-weight:700">
+          {e(verdict_str.replace('_',' ').upper())}</span></div>
       <div class="meta-item"><label>Verdict basis</label>
         <span>{e(basis_desc)}</span></div>
+      <div class="meta-item"><label>Advisory source</label><span>{e(adv_src)}</span></div>
+      <div class="meta-item"><label>Advisory count</label><span>{adv_count}</span></div>
       {'<div class="meta-item"><label>Lookup error</label>'
        f'<span style="color:#c0392b">{e(adv_err)}</span></div>' if adv_err else ''}
     </div>
