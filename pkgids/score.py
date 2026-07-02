@@ -5,11 +5,17 @@ Scoring weights (per Direction 4 spec):
     subprocess shell / encoded command   +15   new suspicious baseline delta   +20
     install timeout / hook               +10   combo bonus (network + secret)  +25
 
-Verdict thresholds:
-     0 – 24   benign
+Verdict thresholds (dynamic behavioral evidence only):
+     0         no_malicious_behavior_observed  — no indicators detected
+     1 – 24   low_risk                         — weak signals, below suspicious
     25 – 49   suspicious
     50 – 74   likely_malicious
     75 – 100  malicious
+
+Note: "benign" is intentionally absent from the score-based verdict.
+Zero dynamic signal means the sandbox observed nothing — not that the
+package is proven safe.  Advisory intelligence (see advisory.py) may
+further elevate the analyst-facing final_verdict in reporting.
 """
 
 from __future__ import annotations
@@ -59,7 +65,7 @@ _THRESHOLDS: list[tuple[int, str]] = [
     (75, "malicious"),
     (50, "likely_malicious"),
     (25, "suspicious"),
-    (0,  "benign"),
+    (1,  "low_risk"),
 ]
 
 
@@ -165,16 +171,22 @@ def score_breakdown(indicators: list[dict]) -> dict:
 
 
 def verdict(malice_score: int) -> str:
-    """Map an additive score (0–100) to a human-readable verdict.
+    """Map an additive score (0–100) to a behavioral verdict string.
 
     Returns
     -------
-    "malicious"         — score ≥ 75
-    "likely_malicious"  — score ≥ 50
-    "suspicious"        — score ≥ 25
-    "benign"            — score < 25
+    "malicious"                      — score ≥ 75
+    "likely_malicious"               — score ≥ 50
+    "suspicious"                     — score ≥ 25
+    "low_risk"                       — score 1–24
+    "no_malicious_behavior_observed" — score 0 (no indicators detected)
+
+    "benign" is deliberately absent: zero dynamic signal means the sandbox
+    observed nothing, not that the package is proven safe.
     """
+    if malice_score == 0:
+        return "no_malicious_behavior_observed"
     for threshold, label in _THRESHOLDS:
         if malice_score >= threshold:
             return label
-    return "benign"
+    return "no_malicious_behavior_observed"

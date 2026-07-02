@@ -37,8 +37,21 @@ class TestInstallCommand:
     def test_pypi_no_build_isolation(self):
         assert "--no-build-isolation" in _install_command("pypi", "six-1.16.0.tar.gz")
 
-    def test_pypi_no_deps(self):
+    def test_pypi_no_deps_by_default(self):
         assert "--no-deps" in _install_command("pypi", "six-1.16.0.tar.gz")
+
+    def test_pypi_with_deps_removes_no_deps(self):
+        cmd = _install_command("pypi", "six-1.16.0.tar.gz", with_deps=True)
+        assert "--no-deps" not in cmd
+
+    def test_pypi_with_deps_false_keeps_no_deps(self):
+        cmd = _install_command("pypi", "six-1.16.0.tar.gz", with_deps=False)
+        assert "--no-deps" in cmd
+
+    def test_pypi_with_deps_still_uses_target(self):
+        cmd = _install_command("pypi", "six-1.16.0.tar.gz", with_deps=True)
+        assert "--target" in cmd
+        assert "/scratch/site-packages" in cmd
 
     def test_pypi_target_scratch(self):
         cmd = _install_command("pypi", "six-1.16.0.tar.gz")
@@ -943,6 +956,47 @@ class TestCLIDetonate:
             main(["detonate", "pypi", "six", "1.16.0", "--skip-import", "--run-dir", str(run_dir)])
         # install + post_install_idle (config default = 2s); post_import_idle skipped
         assert mock_exec.call_count == 2
+
+
+# ── with_deps mode ───────────────────────────────────────────────────────────
+
+class TestWithDepsFlag:
+    def test_install_deps_enabled_false_in_sandbox_meta(self, fake_artifact, tmp_path):
+        """Default run records install_deps_enabled=False in sandbox_meta."""
+        run_dir = tmp_path / "run1"
+        patches = _patch_all(fake_artifact, run_dir)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], patches[7], patches[8]:
+            summary = run("pypi", "six", "1.16.0",
+                          run_dir=run_dir,
+                          post_install_idle_secs=0,
+                          post_import_idle_secs=0)
+        assert summary["sandbox_meta"]["install_deps_enabled"] is False
+
+    def test_install_deps_enabled_true_in_sandbox_meta(self, fake_artifact, tmp_path):
+        """with_deps=True records install_deps_enabled=True."""
+        run_dir = tmp_path / "run2"
+        patches = _patch_all(fake_artifact, run_dir)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], patches[7], patches[8]:
+            summary = run("pypi", "six", "1.16.0",
+                          run_dir=run_dir,
+                          with_deps=True,
+                          post_install_idle_secs=0,
+                          post_import_idle_secs=0)
+        assert summary["sandbox_meta"]["install_deps_enabled"] is True
+        assert "--no-deps" not in summary["sandbox_meta"]["install_cmd"]
+
+    def test_default_install_cmd_has_no_deps(self, fake_artifact, tmp_path):
+        run_dir = tmp_path / "run3"
+        patches = _patch_all(fake_artifact, run_dir)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patches[5], patches[6], patches[7], patches[8]:
+            summary = run("pypi", "six", "1.16.0",
+                          run_dir=run_dir,
+                          post_install_idle_secs=0,
+                          post_import_idle_secs=0)
+        assert "--no-deps" in summary["sandbox_meta"]["install_cmd"]
 
 
 # ── real end-to-end test (requires Docker + sandbox + fakeinternet) ───────────

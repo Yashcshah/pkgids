@@ -63,9 +63,17 @@ def normalize(
         pass
 
     # ── metadata.json ─────────────────────────────────────────────────────────
+    # Primary location: run_dir/metadata.json (written there for some workflows).
+    # Fallback: artifact dir derived from run.json's "artifact" field (the
+    # standard location written by fetch.py).
     metadata: dict = {}
+    _meta_path = run_dir / "metadata.json"
+    if not _meta_path.exists():
+        _artifact_str = run_data.get("artifact", "")
+        if _artifact_str:
+            _meta_path = Path(_artifact_str).parent / "metadata.json"
     try:
-        metadata = json.loads((run_dir / "metadata.json").read_text())
+        metadata = json.loads(_meta_path.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -114,7 +122,8 @@ def normalize(
             "version":   run_data.get("version"),
             "run_dir":   str(run_dir),
         },
-        "metadata": metadata,
+        "metadata":  metadata,
+        "advisory":  metadata.get("advisory") or {},
         "phases": {
             "install": _phase("install"),
             "import":  _phase("import"),
@@ -300,11 +309,41 @@ def _build_narrative(
 
 # ── report builder ────────────────────────────────────────────────────────────
 
+_BELOW_SUSPICIOUS: frozenset[str] = frozenset({
+    "no_malicious_behavior_observed",
+    "low_risk",
+})
+
+
+def _combine_verdicts(dynamic_verdict: str, advisory_hit: bool) -> tuple[str, str]:
+    """Return (final_verdict, verdict_basis).
+
+    verdict_basis is one of: "dynamic" | "advisory" | "both"
+
+    Advisory intelligence can only escalate, never lower:
+    - no signal + advisory hit → "known_vulnerable"   (basis: "advisory")
+    - low risk  + advisory hit → "known_vulnerable"   (basis: "advisory")
+    - suspicious+ advisory hit → "suspicious"         (basis: "both")
+    - higher    + advisory hit → unchanged            (basis: "both")
+    - no advisory hit          → dynamic verdict      (basis: "dynamic")
+    """
+    if not advisory_hit:
+        return dynamic_verdict, "dynamic"
+    if dynamic_verdict in _BELOW_SUSPICIOUS:
+        return "known_vulnerable", "advisory"
+    return dynamic_verdict, "both"
+
+
 def build_report(normalized: dict) -> dict:
     """Derive indicators, score, verdict, narrative, and score breakdown.
 
     Score is an additive integer in [0, 100]; confidence is a float in [0, 1].
-    Verdict is one of: benign / suspicious / likely_malicious / malicious.
+
+    Three verdict fields are present in the output:
+        dynamic_verdict — behavioral evidence only (from score model)
+        advisory        — normalized OSV advisory summary
+        verdict         — final analyst-facing verdict combining both sources
+        verdict_basis   — "dynamic" | "advisory" | "both"
     """
     from .indicators import extract_indicators
     from .score import (
@@ -314,11 +353,15 @@ def build_report(normalized: dict) -> dict:
         score_breakdown as _breakdown,
     )
 
-    indicators   = extract_indicators(normalized)
-    malice_score = _score(indicators)
-    verdict_str  = _verdict(malice_score)
-    conf_val     = _conf(indicators)
-    breakdown    = _breakdown(indicators)
+    indicators      = extract_indicators(normalized)
+    malice_score    = _score(indicators)
+    dynamic_verdict = _verdict(malice_score)
+    conf_val        = _conf(indicators)
+    breakdown       = _breakdown(indicators)
+
+    advisory = normalized.get("advisory") or {}
+    advisory_hit = bool(advisory.get("advisory_hit"))
+    final_verdict, verdict_basis = _combine_verdicts(dynamic_verdict, advisory_hit)
 
     raw_tactics    = sorted({i["tactic"] for i in indicators})
     attack_tactics = [_format_tactic(t) for t in raw_tactics]
@@ -331,6 +374,16 @@ def build_report(normalized: dict) -> dict:
         normalized.get("telemetry", {}),
         normalized.get("correlations", {}),
     )
+    if advisory_hit:
+        ids_str = ", ".join(advisory.get("advisory_ids", [])[:5]) or "unknown"
+        count   = advisory.get("advisory_count", 0)
+        src     = advisory.get("advisory_source") or "unknown"
+        narrative.append(
+            f"Advisory intelligence ({src}): {count} known advisory record(s) "
+            f"found for this package version ({ids_str}). "
+            f"The sandbox did not observe the malicious behavior trigger during "
+            f"this run — absence of runtime evidence does not clear the advisory."
+        )
 
     return {
         # public spec schema
@@ -339,13 +392,17 @@ def build_report(normalized: dict) -> dict:
             "name":      run.get("name"),
             "version":   run.get("version"),
         },
-        "verdict":        verdict_str,
-        "score":          malice_score,
-        "confidence":     conf_val,
-        "attack_tactics": attack_tactics,
-        "techniques":     techniques,
-        "indicators":     indicators,
-        "narrative":      narrative,
+        # three-layer verdict (see module docstring)
+        "verdict":         final_verdict,
+        "dynamic_verdict": dynamic_verdict,
+        "verdict_basis":   verdict_basis,
+        "advisory":        advisory,
+        "score":           malice_score,
+        "confidence":      conf_val,
+        "attack_tactics":  attack_tactics,
+        "techniques":      techniques,
+        "indicators":      indicators,
+        "narrative":       narrative,
         "score_breakdown": breakdown,
         "summary": {
             "indicator_count": len(indicators),
@@ -370,10 +427,14 @@ def build_report(normalized: dict) -> dict:
 # ── HTML renderer ─────────────────────────────────────────────────────────────
 
 _VERDICT_COLOR: dict[str, str] = {
-    "malicious":        "#c0392b",
-    "likely_malicious": "#e74c3c",
-    "suspicious":       "#e67e22",
-    "benign":           "#27ae60",
+    "malicious":                      "#c0392b",
+    "likely_malicious":               "#e74c3c",
+    "suspicious":                     "#e67e22",
+    "known_vulnerable":               "#8e44ad",
+    "low_risk":                       "#27ae60",
+    "no_malicious_behavior_observed": "#7f8c8d",
+    # kept for any legacy report dicts passed directly to build_html_report()
+    "benign":                         "#27ae60",
 }
 _SEV_COLOR: dict[str, str] = {
     "critical": "#c0392b",
@@ -404,20 +465,23 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
     """
     e = _html.escape
 
-    pkg          = report_dict.get("package") or report_dict.get("_run") or {}
-    verdict_str  = report_dict.get("verdict", "unknown")
-    score_val    = int(report_dict.get("score", 0))
-    confidence   = float(report_dict.get("confidence", 0.0))
-    tactics      = report_dict.get("attack_tactics") or []
-    techniques   = report_dict.get("techniques", [])
-    indicators   = report_dict.get("indicators", [])
-    summary      = report_dict.get("summary", {})
-    event_counts = report_dict.get("event_counts", {})
-    phases       = report_dict.get("phases", {})
-    metadata     = report_dict.get("metadata", {})
-    diff         = report_dict.get("diff")
-    narrative    = report_dict.get("narrative", [])
-    breakdown    = report_dict.get("score_breakdown", {})
+    pkg             = report_dict.get("package") or report_dict.get("_run") or {}
+    verdict_str     = report_dict.get("verdict", "unknown")
+    dynamic_verdict = report_dict.get("dynamic_verdict", verdict_str)
+    verdict_basis   = report_dict.get("verdict_basis", "dynamic")
+    advisory        = report_dict.get("advisory") or {}
+    score_val       = int(report_dict.get("score", 0))
+    confidence      = float(report_dict.get("confidence", 0.0))
+    tactics         = report_dict.get("attack_tactics") or []
+    techniques      = report_dict.get("techniques", [])
+    indicators      = report_dict.get("indicators", [])
+    summary         = report_dict.get("summary", {})
+    event_counts    = report_dict.get("event_counts", {})
+    phases          = report_dict.get("phases", {})
+    metadata        = report_dict.get("metadata", {})
+    diff            = report_dict.get("diff")
+    narrative       = report_dict.get("narrative", [])
+    breakdown       = report_dict.get("score_breakdown", {})
 
     phases_detail = report_dict.get("_phases_detail", {})
     network       = report_dict.get("_network", {})
@@ -435,6 +499,49 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
     # ── 1. Narrative ──────────────────────────────────────────────────────────
     narrative_html = "\n".join(f"<p>{e(s)}</p>" for s in narrative) \
         or '<p class="muted">No summary available.</p>'
+
+    # ── 1b. Advisory section ──────────────────────────────────────────────────
+    adv_hit    = advisory.get("advisory_hit", False)
+    adv_count  = advisory.get("advisory_count", 0)
+    adv_src    = advisory.get("advisory_source") or "—"
+    adv_err    = advisory.get("advisory_error")
+    adv_ids    = advisory.get("advisory_ids") or []
+    adv_sums   = advisory.get("advisory_summaries") or []
+    dv_color   = _VERDICT_COLOR.get(dynamic_verdict, "#7f8c8d")
+    basis_desc = {
+        "dynamic":  "behavioral evidence only",
+        "advisory": "advisory intelligence (no runtime trigger observed)",
+        "both":     "behavioral evidence + advisory intelligence",
+    }.get(verdict_basis, verdict_basis)
+
+    adv_id_cells = "".join(
+        f'<tr><td><code>{e(i)}</code></td>'
+        f'<td class="ev">{e(s)}</td></tr>\n'
+        for i, s in zip(adv_ids, adv_sums + [""] * len(adv_ids))
+    ) or '<tr><td colspan="2" class="muted">No advisories found</td></tr>'
+
+    advisory_section = f"""
+  <section>
+    <h2>Advisory Intelligence <span class="q">OSV.dev lookup</span></h2>
+    <div class="meta" style="margin-bottom:12px">
+      <div class="meta-item"><label>Advisory hit</label>
+        <span style="color:{'#c0392b' if adv_hit else '#27ae60'};font-weight:700">
+          {'YES' if adv_hit else 'no'}</span></div>
+      <div class="meta-item"><label>Source</label><span>{e(adv_src)}</span></div>
+      <div class="meta-item"><label>Advisory count</label><span>{adv_count}</span></div>
+      <div class="meta-item"><label>Dynamic verdict</label>
+        <span style="color:{dv_color};font-weight:700">
+          {e(dynamic_verdict.replace('_',' ').upper())}</span></div>
+      <div class="meta-item"><label>Verdict basis</label>
+        <span>{e(basis_desc)}</span></div>
+      {'<div class="meta-item"><label>Lookup error</label>'
+       f'<span style="color:#c0392b">{e(adv_err)}</span></div>' if adv_err else ''}
+    </div>
+    <table>
+      <thead><tr><th>ID / Alias</th><th>Summary</th></tr></thead>
+      <tbody>{adv_id_cells}</tbody>
+    </table>
+  </section>"""
 
     sev_chips = ""
     if summary.get("critical"):
@@ -791,7 +898,7 @@ def build_html_report(report_dict: dict) -> str:  # noqa: C901
       <div class="meta-item"><label>Files in artifact</label><span>{file_cnt}</span></div>
     </div>
   </section>
-
+  {advisory_section}
   <section>
     <h2>Why was this verdict assigned? <span class="q">score breakdown</span></h2>
     <table>

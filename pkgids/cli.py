@@ -39,6 +39,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write run artifacts to DIR instead of the auto-generated runs/<id>/ path",
     )
+    detonate.add_argument(
+        "--with-deps",
+        action="store_true",
+        default=False,
+        help=(
+            "Install package dependencies inside the sandbox (removes --no-deps). "
+            "Default is dependency-free install. "
+            "WARNING: dependencies fetch from the fake-internet sink and may not "
+            "resolve; this mode is intended to observe dependency-mediated behavior."
+        ),
+    )
 
     # ── fetch ─────────────────────────────────────────────────────────────────
     fetch_cmd = subparsers.add_parser(
@@ -251,6 +262,7 @@ def cmd_detonate(args: argparse.Namespace) -> int:
             args.ecosystem, args.name, args.version,
             run_dir=args.run_dir,
             skip_import=skip_import,
+            with_deps=bool(args.with_deps),
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -156,11 +156,15 @@ class TestConfidence:
 # ── verdict() ─────────────────────────────────────────────────────────────────
 
 class TestVerdict:
-    def test_0_is_benign(self):
-        assert verdict(0) == "benign"
+    def test_0_is_no_malicious_behavior_observed(self):
+        assert verdict(0) == "no_malicious_behavior_observed"
 
-    def test_24_is_benign(self):
-        assert verdict(24) == "benign"
+    def test_24_is_low_risk(self):
+        # score 1-24: some weak signals but below suspicious threshold
+        assert verdict(24) == "low_risk"
+
+    def test_10_is_low_risk(self):
+        assert verdict(10) == "low_risk"
 
     def test_25_is_suspicious(self):
         assert verdict(25) == "suspicious"
@@ -180,9 +184,20 @@ class TestVerdict:
     def test_100_is_malicious(self):
         assert verdict(100) == "malicious"
 
-    def test_four_tier_coverage(self):
-        results = {verdict(s) for s in [0, 25, 50, 75]}
-        assert results == {"benign", "suspicious", "likely_malicious", "malicious"}
+    def test_five_tier_coverage(self):
+        results = {verdict(s) for s in [0, 10, 25, 50, 75]}
+        assert results == {
+            "no_malicious_behavior_observed",
+            "low_risk",
+            "suspicious",
+            "likely_malicious",
+            "malicious",
+        }
+
+    def test_benign_not_in_score_verdicts(self):
+        # "benign" is intentionally absent from the score-based verdict
+        for s in range(0, 101):
+            assert verdict(s) != "benign"
 
 
 # ── score + verdict integration ────────────────────────────────────────────────
@@ -202,9 +217,9 @@ class TestScoreVerdictIntegration:
         s = score(inds)
         assert verdict(s) == "likely_malicious"
 
-    def test_single_low_signal_is_benign(self):
+    def test_single_low_signal_is_low_risk(self):
         s = score([{"id": "install_timed_out", "tactic": "defense-evasion"}])
-        assert verdict(s) == "benign"
+        assert verdict(s) == "low_risk"
 
     def test_full_exfil_chain_is_malicious(self):
         inds = [
