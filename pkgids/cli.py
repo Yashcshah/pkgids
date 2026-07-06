@@ -212,6 +212,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root directory for export bundles (default: exports/ next to runs/)",
     )
 
+    # ── scan ──────────────────────────────────────────────────────────────────
+    scan_cmd = subparsers.add_parser(
+        "scan",
+        help=(
+            "Scan a requirements.txt, CycloneDX JSON, or CSV file "
+            "through the full pkgids pipeline."
+        ),
+    )
+    scan_cmd.add_argument(
+        "input_file",
+        metavar="FILE",
+        help="requirements.txt, CycloneDX JSON (.json), or CSV (.csv) to scan",
+    )
+    scan_cmd.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Write batch_results.json and batch_report.html here "
+            "(default: scan-<timestamp>/ in the current directory)"
+        ),
+    )
+    scan_cmd.add_argument(
+        "--export-dir",
+        metavar="DIR",
+        default=None,
+        help="Root directory for per-package export bundles (default: exports/ next to runs/)",
+    )
+    scan_cmd.add_argument(
+        "--with-deps",
+        action="store_true",
+        default=False,
+        help="Install package dependencies inside the sandbox for each detonation",
+    )
+    scan_cmd.add_argument(
+        "--skip-import",
+        action="store_true",
+        default=False,
+        help="Skip the import phase for every package",
+    )
+    scan_cmd.add_argument(
+        "--no-export",
+        action="store_true",
+        default=False,
+        help="Skip creating per-package export bundles",
+    )
+    scan_cmd.add_argument(
+        "--no-resume",
+        action="store_true",
+        default=False,
+        help="Re-run all packages even if already present in batch_results.json",
+    )
+    scan_cmd.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of parallel workers (must be 1 in v1; sequential only)",
+    )
+
     # ── validate ──────────────────────────────────────────────────────────────
     validate_cmd = subparsers.add_parser(
         "validate",
@@ -614,6 +674,82 @@ def cmd_dataset_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan(args: argparse.Namespace) -> int:
+    from pathlib import Path as _Path
+    from datetime import datetime as _dt, timezone as _tz
+    from .sbom import parse as _parse, detect_format as _detect_fmt
+    from .batch import run_batch as _run_batch, exit_code_for_results as _exit_code
+
+    if args.workers != 1:
+        print(
+            "error: --workers > 1 is not supported in v1. "
+            "Use --workers 1 (the default).",
+            file=sys.stderr,
+        )
+        return 1
+
+    input_path = _Path(args.input_file)
+    if not input_path.exists():
+        print(f"error: input file not found: {input_path}", file=sys.stderr)
+        return 1
+
+    try:
+        packages, parse_warnings = _parse(input_path)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    for w in parse_warnings:
+        print(f"[scan] warning: {w}", file=sys.stderr)
+
+    if not packages:
+        print("[scan] no packages to scan after parsing.", file=sys.stderr)
+        return 0
+
+    try:
+        input_format = _detect_fmt(input_path)
+    except ValueError:
+        input_format = "unknown"
+
+    if args.output_dir:
+        output_dir = _Path(args.output_dir)
+    else:
+        batch_ts   = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+        output_dir = _Path(f"scan-{batch_ts}")
+
+    export_root = _Path(args.export_dir) if args.export_dir else None
+
+    try:
+        result = _run_batch(
+            packages,
+            output_dir=output_dir,
+            export_root=export_root,
+            resume=not args.no_resume,
+            with_deps=bool(args.with_deps),
+            skip_import=bool(args.skip_import),
+            no_export=bool(args.no_export),
+            parse_warnings=parse_warnings,
+            parse_skipped=len(parse_warnings),
+            input_file=input_path.name,
+            input_format=input_format,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    s = result.get("summary", {})
+    print(
+        f"\n[scan] completed: {s.get('completed', 0)}  "
+        f"errors: {s.get('errors', 0)}  "
+        f"malicious: {s.get('malicious', 0) + s.get('likely_malicious', 0)}  "
+        f"suspicious: {s.get('suspicious', 0)}"
+    )
+    print(f"[scan] results  -> {output_dir / 'batch_results.json'}")
+    print(f"[scan] report   -> {output_dir / 'batch_report.html'}")
+
+    return _exit_code(result.get("results", []))
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     from pathlib import Path
     from .validate import run_validation, _DEFAULT_RESULTS
@@ -677,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "baseline":  return cmd_baseline(args)
     if args.command == "diff":      return cmd_diff(args)
     if args.command == "report":    return cmd_report(args)
+    if args.command == "scan":      return cmd_scan(args)
 
     print(f"error: unknown command '{args.command}'", file=sys.stderr)
     return 1

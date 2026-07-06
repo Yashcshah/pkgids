@@ -197,6 +197,57 @@ pkgids validate --samples data/corpus_samples.csv --local-artifacts
 
 Validation is resumable. Samples already in data/validation_results.json are skipped on re-run.
 
+### Batch scanning (requirements / SBOM / CSV)
+
+Scan every package in a `requirements.txt`, a CycloneDX JSON SBOM, or a plain CSV file through the full detonation + report pipeline:
+
+```bash
+# Scan a pinned requirements file
+pkgids scan requirements.txt
+
+# Scan a CycloneDX SBOM produced by a dependency scanner
+pkgids scan sbom.json
+
+# Scan a plain CSV  (columns: ecosystem,name,version)
+pkgids scan packages.csv --output-dir results/
+
+# Skip per-package export bundles for a quick pass
+pkgids scan requirements.txt --no-export
+
+# Re-run everything even if a prior batch_results.json exists
+pkgids scan requirements.txt --no-resume
+```
+
+Input format rules:
+
+| Format | Detection | Version requirement |
+|---|---|---|
+| `requirements.txt` | filename or `*require*.txt` | `==` pin only — `>=` warns and skips |
+| CycloneDX JSON | `.json` file containing `"bomFormat"` + `"CycloneDX"` | Version in PURL `@version` or component `version` field; missing → skip |
+| Plain CSV | `.csv` extension | `version` column must be non-empty |
+
+Supported ecosystems in v1: `pypi`, `npm`. Lines for other ecosystems are skipped with a warning printed to stderr.
+
+Output lands in `scan-<timestamp>/` (or `--output-dir`):
+
+```
+scan-20240621T120000Z/
+  batch_results.json   # structured summary + per-package verdicts; resumable
+  batch_report.html    # single-table HTML report with verdict colouring
+```
+
+Exit codes follow the same policy as `pkgids detonate`:
+
+| Code | Meaning |
+|---|---|
+| `0` | All packages clean (or no packages) |
+| `1` | At least one `suspicious` or `known_vulnerable` |
+| `2` | At least one `malicious` or `likely_malicious` |
+
+The batch is **resumable**: re-running the same command with the same `--output-dir` skips packages already present in `batch_results.json`. Pass `--no-resume` to force a full re-scan.
+
+`requirements.txt` extras are stripped (`requests[security]==2.28.0` → scans `requests`). Duplicate entries (same ecosystem:name:version) are deduplicated — first occurrence wins.
+
 ### Demo: confirm fake-internet capture works
 
 ```bash
