@@ -56,6 +56,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Skip automatic report generation and export bundle after detonation.",
     )
+    detonate.add_argument(
+        "--trigger",
+        dest="triggers",
+        metavar="TRIGGER_ID",
+        action="append",
+        default=None,
+        help=(
+            "Run only the specified trigger(s).  May be repeated.  "
+            "Supported: install, import_root, install_with_deps.  "
+            "Default: build from --with-deps / --skip-import flags."
+        ),
+    )
 
     # ── fetch ─────────────────────────────────────────────────────────────────
     fetch_cmd = subparsers.add_parser(
@@ -329,15 +341,52 @@ def cmd_detonate(args: argparse.Namespace) -> int:
         return code
 
     from pathlib import Path as _Path
-    from .capture import run as _run
+    from .capture import run as _run, _install_command, _import_command, _build_trigger_plans
+    from .triggers import SUPPORTED_TRIGGER_IDS, TriggerPlan
 
     skip_import = True if args.skip_import else None
+
+    # Build explicit trigger plans when --trigger flags are provided.
+    trigger_plans = None
+    if args.triggers:
+        unsupported = [t for t in args.triggers if t not in SUPPORTED_TRIGGER_IDS]
+        if unsupported:
+            supported_str = ", ".join(sorted(SUPPORTED_TRIGGER_IDS))
+            print(
+                f"error: unsupported trigger id(s): {', '.join(unsupported)}. "
+                f"Supported: {supported_str}",
+                file=sys.stderr,
+            )
+            return 1
+        # Build plans in the order the user specified them; post_delay defaults to 0.
+        _label_map = {
+            "install":           "Install",
+            "install_with_deps": "Install (with deps)",
+            "import_root":       "Import (root)",
+        }
+        trigger_plans = []
+        for tid in args.triggers:
+            if "install" in tid:
+                with_deps = tid == "install_with_deps"
+                cmd = tuple(_install_command(args.ecosystem, "<artifact>", with_deps=with_deps))
+                timeout = 120
+            else:
+                cmd = tuple(_import_command(args.ecosystem, args.name))
+                timeout = 30
+            trigger_plans.append(TriggerPlan(
+                trigger_id=tid,
+                phase_label=_label_map.get(tid, tid),
+                command=cmd,
+                timeout=timeout,
+            ))
+
     try:
         summary = _run(
             args.ecosystem, args.name, args.version,
             run_dir=args.run_dir,
             skip_import=skip_import,
             with_deps=bool(args.with_deps),
+            trigger_plans=trigger_plans,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

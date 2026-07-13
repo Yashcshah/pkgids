@@ -18,6 +18,7 @@ from .sandbox import (
     start_sandbox_container,
     stop_sandbox_container,
 )
+from .triggers import TriggerPlan, TriggerResult
 
 
 # ── bridge / tcpdump helpers ─────────────────────────────────────────────────
@@ -389,6 +390,179 @@ def _clear_fakeinternet_logs(fi_logs_dir: Path) -> None:
         print(f"[detonate] cleared {cleared} fakeinternet log(s)", flush=True)
 
 
+# ── trigger execution matrix ──────────────────────────────────────────────────
+
+# Maps trigger_id → telemetry phase name used in telemetry.jsonl and install/import.json.
+# Must not change: report.py and indicators.py filter by these exact phase strings.
+_TRIGGER_TO_TEL_PHASE: dict[str, str] = {
+    "install":           "install",
+    "install_with_deps": "install",
+    "import_root":       "import",
+}
+
+# Maps trigger_id → idle phase name written to run.json["phases"] for backward compat.
+_TRIGGER_TO_IDLE_PHASE: dict[str, str] = {
+    "install":           "post_install_idle",
+    "install_with_deps": "post_install_idle",
+    "import_root":       "post_import_idle",
+}
+
+
+def _build_trigger_plans(
+    ecosystem: str,
+    artifact_name: str,
+    package_name: str,
+    *,
+    with_deps: bool = False,
+    skip_import: bool = False,
+    skip_on_fail: bool = False,
+    post_install_secs: int = 0,
+    post_import_secs: int = 0,
+) -> list[TriggerPlan]:
+    """Build the default install + import_root trigger plan list.
+
+    This is the v1.5 default; callers may pass a custom list to run() instead.
+    """
+    install_tid   = "install_with_deps" if with_deps else "install"
+    install_label = "Install (with deps)" if with_deps else "Install"
+
+    plans: list[TriggerPlan] = [
+        TriggerPlan(
+            trigger_id=install_tid,
+            phase_label=install_label,
+            command=tuple(_install_command(ecosystem, artifact_name, with_deps=with_deps)),
+            timeout=120,
+            post_delay=post_install_secs,
+        ),
+    ]
+
+    if not skip_import:
+        requires   = (install_tid,) if skip_on_fail else ()
+        dep_reason = "install_failed" if skip_on_fail else None
+        plans.append(TriggerPlan(
+            trigger_id="import_root",
+            phase_label="Import (root)",
+            command=tuple(_import_command(ecosystem, package_name)),
+            timeout=30,
+            post_delay=post_import_secs,
+            requires=requires,
+            dependency_skip_reason=dep_reason,
+        ))
+
+    return plans
+
+
+def _run_trigger(
+    plan: TriggerPlan,
+    container_name: str,
+    capture_log: str | None,
+    fi_logs_dir: Path,
+    run_dir: Path,
+    eff_telemetry: bool,
+    eff_strace_syscalls: str,
+    eff_max_arg_len: int,
+    eff_sensitive_only: bool,
+) -> tuple[TriggerResult, dict | None, list[dict]]:
+    """Execute one trigger in the running sandbox container.
+
+    Returns
+    -------
+    (TriggerResult, post_delay_record | None, all_entries)
+        post_delay_record is a _make_phase_record dict for the post_delay sleep
+        (written to run.json phases as post_install_idle / post_import_idle).
+        all_entries is the union of network entries from the main command + post_delay.
+    """
+    tel_phase      = _TRIGGER_TO_TEL_PHASE.get(plan.trigger_id, plan.trigger_id)
+    strace_log_path = f"/scratch/strace_{plan.trigger_id}.log"
+
+    cmd      = list(plan.command)
+    exec_cmd = (
+        _with_strace(cmd, strace_log_path,
+                     syscalls=eff_strace_syscalls, max_arg_len=eff_max_arg_len)
+        if eff_telemetry else cmd
+    )
+
+    t0  = time.time()
+    raw = exec_in_sandbox(container_name, exec_cmd)
+    t1  = time.time()
+
+    # Read strace log for process telemetry
+    proc_limited = not eff_telemetry
+    parsed: dict = {}
+    if eff_telemetry:
+        raw_trace = read_container_file(container_name, strace_log_path)
+        if raw_trace:
+            parsed = _telemetry.parse_strace_log(raw_trace, sensitive_only=eff_sensitive_only)
+        else:
+            proc_limited = True
+    process_activity = _telemetry.summarise_telemetry(parsed, telemetry_limited_process=proc_limited)
+
+    _append_telemetry_jsonl(run_dir / "telemetry.jsonl", parsed, tel_phase)
+
+    entries = _read_phase_entries(capture_log, t0, t1, fi_logs_dir)
+
+    phase_record = _make_phase_record(
+        tel_phase, cmd, raw, t0, t1, capture_log, entries,
+        process_activity=process_activity,
+    )
+    (run_dir / f"{tel_phase}.json").write_text(json.dumps(phase_record, indent=2))
+
+    status = _phase_status(raw, tel_phase)
+    result = TriggerResult(
+        trigger_id=plan.trigger_id,
+        phase_label=plan.phase_label,
+        status=status,
+        t_start=t0,
+        t_end=t1,
+        stdout=raw.get("stdout", ""),
+        stderr=raw.get("stderr", ""),
+        exit_code=raw.get("exit_code"),
+        timed_out=bool(raw.get("timed_out", False)),
+        network_activity=_has_network(entries),
+        process_activity=process_activity,
+    )
+
+    all_entries = list(entries)
+
+    # Execute post_delay sleep (replaces separate idle pseudo-phase)
+    post_record: dict | None = None
+    if plan.post_delay > 0:
+        idle_phase_name = _TRIGGER_TO_IDLE_PHASE.get(plan.trigger_id)
+        if idle_phase_name:
+            idle_cmd     = ["sleep", str(plan.post_delay)]
+            idle_t0      = time.time()
+            idle_raw     = exec_in_sandbox(container_name, idle_cmd)
+            idle_t1      = time.time()
+            idle_entries = _read_phase_entries(capture_log, idle_t0, idle_t1, fi_logs_dir)
+            post_record  = _make_phase_record(
+                idle_phase_name, idle_cmd, idle_raw,
+                idle_t0, idle_t1, capture_log, idle_entries,
+            )
+            all_entries.extend(idle_entries)
+
+    return result, post_record, all_entries
+
+
+def _trigger_to_phase_entry(
+    result: TriggerResult,
+    *,
+    telemetry_limited: bool,
+) -> dict:
+    """Build a phases-shim entry from a completed (non-skipped) TriggerResult."""
+    return {
+        "phase":             _TRIGGER_TO_TEL_PHASE.get(result.trigger_id, result.trigger_id),
+        "status":            result.status,
+        "t_start":           result.t_start,
+        "t_end":             result.t_end,
+        "exit_code":         result.exit_code,
+        "duration_secs":     round(result.t_end - result.t_start, 3),
+        "timed_out":         result.timed_out,
+        "network_activity":  result.network_activity,
+        "telemetry_limited": telemetry_limited,
+        "process_activity":  result.process_activity,
+    }
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def run(
@@ -402,6 +576,7 @@ def run(
     post_import_idle_secs: int | None = None,
     skip_import_on_install_failure: bool | None = None,
     with_deps: bool = False,
+    trigger_plans: list[TriggerPlan] | None = None,
 ) -> dict:
     """Full detonation pipeline for one package.
 
@@ -511,6 +686,20 @@ def run(
         run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[detonate] run dir -> {run_dir}", flush=True)
 
+    # Build trigger plans now (needs artifact.name) so sandbox_meta can reference them.
+    if trigger_plans is None:
+        trigger_plans = _build_trigger_plans(
+            ecosystem, artifact.name, name,
+            with_deps=with_deps,
+            skip_import=effective_skip_import,
+            skip_on_fail=eff_skip_on_fail,
+            post_install_secs=eff_post_install_secs,
+            post_import_secs=eff_post_import_secs,
+        )
+
+    _install_plan = next((p for p in trigger_plans if "install" in p.trigger_id), None)
+    _import_plan  = next((p for p in trigger_plans if p.trigger_id == "import_root"), None)
+
     # ── 4. Start tcpdump (host-side, best-effort) ─────────────────────────────
     tcpdump_proc: subprocess.Popen | None = None
     pcap_path = run_dir / "capture.pcap"
@@ -522,21 +711,15 @@ def run(
     except Exception as exc:
         print(f"[detonate] WARNING: tcpdump unavailable ({exc}); continuing without pcap", flush=True)
 
-    # Phase records — populated during the try block and in the shutdown finally.
-    startup_record:           dict = {}
-    install_record:           dict = {}
-    post_install_record:      dict = {}
-    import_record:            dict = {}
-    post_import_record:       dict = {}
-    shutdown_record:          dict = {}
-    all_network_entries:      list[dict] = []
-    capture_log:              str | None = None
-    sandbox_info:             dict | None = None
-    skip_import_due_to_fail:  bool = False
-    skip_import_reason:       str  = "skip_import" if effective_skip_import else ""
-
-    install_cmd = _install_command(ecosystem, artifact.name, with_deps=with_deps)
-    import_cmd  = _import_command(ecosystem, name)
+    # Accumulators — populated during the try block and in the shutdown finally.
+    startup_record:     dict       = {}
+    shutdown_record:    dict       = {}
+    all_network_entries: list[dict] = []
+    capture_log:        str | None = None
+    sandbox_info:       dict | None = None
+    trigger_results:    list[TriggerResult] = []
+    post_delay_records: list[dict | None]   = []
+    completed_statuses: dict[str, str]      = {}
 
     try:
         # ── 5. [startup] — start the analysis container ───────────────────────
@@ -545,8 +728,6 @@ def run(
         try:
             sandbox_info = start_sandbox_container(workdir_host=artifact_dir, network="fake")
         except RuntimeError as exc:
-            # Appliance not running, image missing, or other hard startup failure.
-            # Record as a failed startup phase; remaining phases are skipped.
             startup_t1     = time.time()
             startup_record = {
                 "phase":             "startup",
@@ -571,125 +752,61 @@ def run(
             all_network_entries.extend(startup_entries)
             print(f"[detonate] container {sandbox_info['container_name']} ready", flush=True)
 
-            # ── 6. [install] ──────────────────────────────────────────────────
-            print("[detonate] install phase ...", flush=True)
-            strace_install_log = "/scratch/strace_install.log"
-            install_exec_cmd   = (
-                _with_strace(install_cmd, strace_install_log,
-                             syscalls=eff_strace_syscalls,
-                             max_arg_len=eff_max_arg_len)
-                if eff_telemetry else install_cmd
-            )
-            install_t0  = time.time()
-            install_raw = exec_in_sandbox(sandbox_info["container_name"], install_exec_cmd)
-            install_t1  = time.time()
+            # ── 6–9. Execute each trigger in plan order ───────────────────────
+            for plan in trigger_plans:
+                # Dependency check: skip if any required trigger did not complete ok.
+                failed_dep: str | None = None
+                for dep in plan.requires:
+                    if completed_statuses.get(dep) != "ok":
+                        failed_dep = dep
+                        break
 
-            # Read strace log back from /scratch (stays in the container's tmpfs)
-            install_proc_limited = not eff_telemetry
-            install_parsed: dict = {}
-            if eff_telemetry:
-                raw_trace = read_container_file(
-                    sandbox_info["container_name"], strace_install_log
-                )
-                if raw_trace:
-                    install_parsed = _telemetry.parse_strace_log(
-                        raw_trace, sensitive_only=eff_sensitive_only
+                if failed_dep is not None:
+                    reason = (
+                        plan.dependency_skip_reason
+                        or f"dependency '{failed_dep}' not ok "
+                           f"(status: {completed_statuses.get(failed_dep, 'not_run')})"
                     )
-                else:
-                    install_proc_limited = True
-            install_process_activity = _telemetry.summarise_telemetry(
-                install_parsed, telemetry_limited_process=install_proc_limited
-            )
-
-            install_entries = _read_phase_entries(capture_log, install_t0, install_t1, fi_logs_dir)
-            install_record  = _make_phase_record(
-                "install", install_cmd, install_raw,
-                install_t0, install_t1, capture_log, install_entries,
-                process_activity=install_process_activity,
-            )
-            (run_dir / "install.json").write_text(json.dumps(install_record, indent=2))
-            _append_telemetry_jsonl(run_dir / "telemetry.jsonl", install_parsed, "install")
-            all_network_entries.extend(install_entries)
-            print(f"[detonate] install status={install_record['status']}", flush=True)
-
-            # Check whether install failure should gate the import phase.
-            if install_record["status"] != "ok" and eff_skip_on_fail:
-                skip_import_due_to_fail = True
-                skip_import_reason      = "install_failed"
-                print("[detonate] import skipped (install_failed, skip_import_on_install_failure=true)", flush=True)
-
-            # ── 7. [post_install_idle] ────────────────────────────────────────
-            if eff_post_install_secs > 0:
-                print(f"[detonate] post_install_idle ({eff_post_install_secs}s) ...", flush=True)
-                pi_cmd     = ["sleep", str(eff_post_install_secs)]
-                pi_t0      = time.time()
-                pi_raw     = exec_in_sandbox(sandbox_info["container_name"], pi_cmd)
-                pi_t1      = time.time()
-                pi_entries = _read_phase_entries(capture_log, pi_t0, pi_t1, fi_logs_dir)
-                post_install_record = _make_phase_record(
-                    "post_install_idle", pi_cmd, pi_raw,
-                    pi_t0, pi_t1, capture_log, pi_entries,
-                )
-                all_network_entries.extend(pi_entries)
-
-            # ── 8. [import] ───────────────────────────────────────────────────
-            run_import = not effective_skip_import and not skip_import_due_to_fail
-            if run_import:
-                print("[detonate] import phase ...", flush=True)
-                strace_import_log = "/scratch/strace_import.log"
-                import_exec_cmd   = (
-                    _with_strace(import_cmd, strace_import_log,
-                                 syscalls=eff_strace_syscalls,
-                                 max_arg_len=eff_max_arg_len)
-                    if eff_telemetry else import_cmd
-                )
-                import_t0  = time.time()
-                import_raw = exec_in_sandbox(sandbox_info["container_name"], import_exec_cmd)
-                import_t1  = time.time()
-
-                import_proc_limited = not eff_telemetry
-                import_parsed: dict = {}
-                if eff_telemetry:
-                    raw_trace = read_container_file(
-                        sandbox_info["container_name"], strace_import_log
+                    print(f"[detonate] {plan.trigger_id} skipped ({reason})", flush=True)
+                    empty_pa = _telemetry.summarise_telemetry(
+                        {}, telemetry_limited_process=True
                     )
-                    if raw_trace:
-                        import_parsed = _telemetry.parse_strace_log(
-                            raw_trace, sensitive_only=eff_sensitive_only
-                        )
-                    else:
-                        import_proc_limited = True
-                import_process_activity = _telemetry.summarise_telemetry(
-                    import_parsed, telemetry_limited_process=import_proc_limited
-                )
-
-                import_entries = _read_phase_entries(capture_log, import_t0, import_t1, fi_logs_dir)
-                import_record  = _make_phase_record(
-                    "import", import_cmd, import_raw,
-                    import_t0, import_t1, capture_log, import_entries,
-                    process_activity=import_process_activity,
-                )
-                (run_dir / "import.json").write_text(json.dumps(import_record, indent=2))
-                _append_telemetry_jsonl(run_dir / "telemetry.jsonl", import_parsed, "import")
-                all_network_entries.extend(import_entries)
-                print(f"[detonate] import status={import_record['status']}", flush=True)
-
-                # ── 9. [post_import_idle] ─────────────────────────────────────
-                if eff_post_import_secs > 0:
-                    print(f"[detonate] post_import_idle ({eff_post_import_secs}s) ...", flush=True)
-                    pm_cmd     = ["sleep", str(eff_post_import_secs)]
-                    pm_t0      = time.time()
-                    pm_raw     = exec_in_sandbox(sandbox_info["container_name"], pm_cmd)
-                    pm_t1      = time.time()
-                    pm_entries = _read_phase_entries(capture_log, pm_t0, pm_t1, fi_logs_dir)
-                    post_import_record = _make_phase_record(
-                        "post_import_idle", pm_cmd, pm_raw,
-                        pm_t0, pm_t1, capture_log, pm_entries,
+                    skipped = TriggerResult(
+                        trigger_id=plan.trigger_id,
+                        phase_label=plan.phase_label,
+                        status="skipped",
+                        t_start=time.time(),
+                        t_end=time.time(),
+                        stdout="",
+                        stderr="",
+                        exit_code=None,
+                        timed_out=False,
+                        network_activity=False,
+                        process_activity=empty_pa,
+                        skip_reason=reason,
                     )
-                    all_network_entries.extend(pm_entries)
-            else:
-                reason = skip_import_reason or "skip_import"
-                print(f"[detonate] import phase skipped ({reason})", flush=True)
+                    trigger_results.append(skipped)
+                    post_delay_records.append(None)
+                    completed_statuses[plan.trigger_id] = "skipped"
+                    continue
+
+                print(f"[detonate] {plan.phase_label} ({plan.trigger_id}) ...", flush=True)
+                result, post_record, entries = _run_trigger(
+                    plan,
+                    sandbox_info["container_name"],
+                    capture_log,
+                    fi_logs_dir,
+                    run_dir,
+                    eff_telemetry,
+                    eff_strace_syscalls,
+                    eff_max_arg_len,
+                    eff_sensitive_only,
+                )
+                trigger_results.append(result)
+                post_delay_records.append(post_record)
+                all_network_entries.extend(entries)
+                completed_statuses[plan.trigger_id] = result.status
+                print(f"[detonate] {plan.trigger_id} status={result.status}", flush=True)
 
     finally:
         # ── 10. [shutdown] — stop tcpdump and remove container ────────────────
@@ -720,49 +837,75 @@ def run(
             for entry in all_network_entries:
                 fh.write(json.dumps(entry) + "\n")
 
-    # ── 12. Write run.json ────────────────────────────────────────────────────
-    # Phases in execution order; only phases that actually ran appear.
+    # ── 12. Build phases dict (backward-compat shim) and triggers list ────────
+    tel_limited = capture_log is None
     phases: dict = {}
     if startup_record:
-        phases["startup"]           = _phase_summary(startup_record)
+        phases["startup"] = _phase_summary(startup_record)
 
-    if install_record:
-        phases["install"]           = _phase_summary(install_record)
-    if post_install_record:
-        phases["post_install_idle"] = _phase_summary(post_install_record)
+    for t_result, post_record in zip(trigger_results, post_delay_records):
+        tel_phase = _TRIGGER_TO_TEL_PHASE.get(t_result.trigger_id, t_result.trigger_id)
+        if t_result.status == "skipped":
+            phases[tel_phase] = {
+                "status": "skipped",
+                "reason": t_result.skip_reason or t_result.trigger_id,
+            }
+        else:
+            phases[tel_phase] = _trigger_to_phase_entry(t_result, telemetry_limited=tel_limited)
 
-    if effective_skip_import or skip_import_due_to_fail:
-        reason = skip_import_reason or "skip_import"
-        phases["import"] = {"status": "skipped", "reason": reason}
-    else:
-        if import_record:
-            phases["import"]           = _phase_summary(import_record)
-        if post_import_record:
-            phases["post_import_idle"] = _phase_summary(post_import_record)
+        if post_record:
+            idle_phase = _TRIGGER_TO_IDLE_PHASE.get(t_result.trigger_id)
+            if idle_phase:
+                phases[idle_phase] = _phase_summary(post_record)
+
+    # Always ensure "import" key exists for backward compat (skipped when not planned).
+    if "import" not in phases:
+        phases["import"] = {"status": "skipped", "reason": "skip_import"}
 
     if shutdown_record:
         phases["shutdown"] = _phase_summary(shutdown_record)
 
+    triggers_list = [
+        {
+            "trigger_id":       r.trigger_id,
+            "phase_label":      r.phase_label,
+            "status":           r.status,
+            "t_start":          r.t_start,
+            "t_end":            r.t_end,
+            "exit_code":        r.exit_code,
+            "timed_out":        r.timed_out,
+            "network_activity": r.network_activity,
+            "process_activity": r.process_activity,
+            "skip_reason":      r.skip_reason,
+        }
+        for r in trigger_results
+    ]
+
+    # ── 13. Write run.json ────────────────────────────────────────────────────
     # network_activity: True/False per phase; None for skipped/startup-failed phases.
     network_activity = {
         phase_name: pdata.get("network_activity") if isinstance(pdata, dict) else None
         for phase_name, pdata in phases.items()
     }
 
-    # Container snapshot metadata (Direction 6) ────────────────────────────────
     sandbox_meta: dict = {
-        "container_name": sandbox_info.get("container_name") if sandbox_info else None,
-        "container_id":   sandbox_info.get("container_id")   if sandbox_info else None,
-        "sandbox_ip":     sandbox_info.get("sandbox_ip")     if sandbox_info else None,
-        "image":          sbx_cfg.get("image",   "pkgids-sandbox:latest"),
-        "runtime":        sbx_cfg.get("runtime", "runsc"),
-        "env_vars":            {},   # no env vars injected by the current rig
-        "install_cmd":         install_cmd,
-        "import_cmd":          None if effective_skip_import else import_cmd,
+        "container_name":      sandbox_info.get("container_name") if sandbox_info else None,
+        "container_id":        sandbox_info.get("container_id")   if sandbox_info else None,
+        "sandbox_ip":          sandbox_info.get("sandbox_ip")     if sandbox_info else None,
+        "image":               sbx_cfg.get("image",   "pkgids-sandbox:latest"),
+        "runtime":             sbx_cfg.get("runtime", "runsc"),
+        "env_vars":            {},
+        "install_cmd":         list(_install_plan.command) if _install_plan else None,
+        "import_cmd":          list(_import_plan.command)  if _import_plan  else None,
         "module_name":         _top_module_name(ecosystem, name),
-        "install_deps_enabled": with_deps,
+        "install_deps_enabled": (
+            _install_plan is not None
+            and _install_plan.trigger_id == "install_with_deps"
+        ),
     }
 
+    install_json_path    = run_dir / "install.json"
+    import_json_path     = run_dir / "import.json"
     telemetry_jsonl_path = run_dir / "telemetry.jsonl"
     summary: dict = {
         "ecosystem":        ecosystem,
@@ -772,16 +915,14 @@ def run(
         "artifact":         str(artifact),
         "sandbox_meta":     sandbox_meta,
         "phases":           phases,
+        "triggers":         triggers_list,
         "network_activity": network_activity,
         "outputs": {
-            "install_json":    str(run_dir / "install.json") if install_record else None,
-            "import_json":     (
-                None if (effective_skip_import or skip_import_due_to_fail or not import_record)
-                else str(run_dir / "import.json")
-            ),
-            "network_jsonl":   str(network_jsonl) if network_jsonl.exists() else None,
+            "install_json":    str(install_json_path)    if install_json_path.exists()    else None,
+            "import_json":     str(import_json_path)     if import_json_path.exists()     else None,
+            "network_jsonl":   str(network_jsonl)         if network_jsonl.exists()        else None,
             "telemetry_jsonl": str(telemetry_jsonl_path) if telemetry_jsonl_path.exists() else None,
-            "capture_pcap":    str(pcap_path) if pcap_path.exists() else None,
+            "capture_pcap":    str(pcap_path)             if pcap_path.exists()           else None,
         },
     }
     (run_dir / "run.json").write_text(json.dumps(summary, indent=2))

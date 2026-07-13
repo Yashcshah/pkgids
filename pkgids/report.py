@@ -129,6 +129,8 @@ def normalize(
             "any_suspicious":   bool(pa.get("any_suspicious")),
         }
 
+    triggers_raw: list[dict] = run_data.get("triggers", [])
+
     return {
         "run": {
             "ecosystem": run_data.get("ecosystem"),
@@ -142,6 +144,7 @@ def normalize(
             "install": _phase("install"),
             "import":  _phase("import"),
         },
+        "triggers": triggers_raw,
         "network": {
             "dns_queries":              dns,
             "http_requests":            http,
@@ -416,6 +419,73 @@ def build_report(normalized: dict) -> dict:
             f"this run — absence of runtime evidence does not clear the advisory."
         )
 
+    # Per-trigger verdicts — lightweight: reuse existing extract/score on a
+    # filtered view of telemetry keyed by the trigger's telemetry phase.
+    _trigger_to_tel_phase = {
+        "install":           "install",
+        "install_with_deps": "install",
+        "import_root":       "import",
+    }
+    tel         = normalized.get("telemetry", {})
+    net         = normalized.get("network", {})
+    trigger_verdicts: list[dict] = []
+    for trig in normalized.get("triggers", []):
+        tid       = trig.get("trigger_id", "")
+        tel_phase = _trigger_to_tel_phase.get(tid, tid)
+        is_import = "import" in tid
+
+        # Slice telemetry down to events from this trigger's phase.
+        trig_exec   = [e for e in tel.get("exec_events",   []) if e.get("phase") == tel_phase]
+        trig_file   = [e for e in tel.get("file_events",   []) if e.get("phase") == tel_phase]
+        trig_socket = [e for e in tel.get("socket_events", []) if e.get("phase") == tel_phase]
+        trig_sens   = [e for e in trig_file if e.get("sensitive")]
+
+        pa = trig.get("process_activity") or {}
+        trig_norm = {
+            "run":      normalized.get("run"),
+            "metadata": normalized.get("metadata"),
+            "advisory": {},
+            "phases": {
+                tel_phase: {
+                    "status":           trig.get("status"),
+                    "exit_code":        trig.get("exit_code"),
+                    "duration_secs":    None,
+                    "process_count":    int(pa.get("process_count") or 0),
+                    "suspicious_execs": pa.get("suspicious_execs") or [],
+                    "sensitive_files":  pa.get("sensitive_file_accesses") or [],
+                    "any_suspicious":   bool(pa.get("any_suspicious")),
+                }
+            },
+            "network": {
+                "dns_queries":              net.get("dns_queries",   []) if not is_import else [],
+                "http_requests":            net.get("http_requests", []) if not is_import else [],
+                "tls_sessions":             net.get("tls_sessions",  []) if not is_import else [],
+                "import_phase_connections": net.get("import_phase_connections", []) if is_import else [],
+            },
+            "telemetry": {
+                "exec_events":           trig_exec,
+                "file_events":           trig_file,
+                "socket_events":         trig_socket,
+                "sensitive_file_events": trig_sens,
+            },
+            "event_counts":  {},
+            "correlations":  {},
+            "diff":          None,
+        }
+        trig_inds  = extract_indicators(trig_norm)
+        trig_score = _score(trig_inds)
+        trig_bv    = _verdict(trig_score)
+        trigger_verdicts.append({
+            "trigger_id":         tid,
+            "phase_label":        trig.get("phase_label", tid),
+            "status":             trig.get("status", "unknown"),
+            "network_activity":   bool(trig.get("network_activity")),
+            "process_activity":   pa,
+            "behavioral_verdict": trig_bv,
+            "score":              trig_score,
+            "indicators":         trig_inds,
+        })
+
     return {
         # public spec schema
         "package": {
@@ -444,6 +514,7 @@ def build_report(normalized: dict) -> dict:
             "medium":   sum(1 for i in indicators if i["severity"] == "medium"),
             "low":      sum(1 for i in indicators if i["severity"] == "low"),
         },
+        "trigger_verdicts": trigger_verdicts,
         "phases":        _phases_summary(normalized),
         "event_counts":  normalized.get("event_counts", {}),
         "metadata":      normalized.get("metadata", {}),
@@ -454,6 +525,7 @@ def build_report(normalized: dict) -> dict:
         "_network":       normalized.get("network", {}),
         "_telemetry":     normalized.get("telemetry", {}),
         "_correlations":  normalized.get("correlations", {}),
+        "_trigger_verdicts": trigger_verdicts,
     }
 
 
@@ -506,6 +578,52 @@ _TACTIC_ID: dict[str, str] = {
 }
 
 
+def _build_trigger_breakdown_section(
+    trigger_verdicts: list[dict],
+    e,  # html.escape
+    verdict_color: dict[str, str],
+) -> str:
+    """Render the Trigger Breakdown HTML section (empty string when no triggers)."""
+    if not trigger_verdicts:
+        return ""
+    rows = ""
+    for tv in trigger_verdicts:
+        bv     = tv.get("behavioral_verdict", "no_malicious_behavior_observed")
+        color  = verdict_color.get(bv, "#7f8c8d")
+        status = tv.get("status", "unknown")
+        net    = "yes" if tv.get("network_activity") else "no"
+        pa     = tv.get("process_activity") or {}
+        procs  = pa.get("process_count", 0)
+        susp   = "yes" if pa.get("any_suspicious") else "no"
+        sc     = tv.get("score", 0)
+        rows += (
+            f'<tr>'
+            f'<td><code>{e(tv.get("trigger_id",""))}</code>'
+            f' <span class="dim">{e(tv.get("phase_label",""))}</span></td>'
+            f'<td>{e(status)}</td>'
+            f'<td>{net}</td>'
+            f'<td class="t-num">{procs}</td>'
+            f'<td><span style="color:{color};font-weight:600">'
+            f'{e(bv.replace("_"," ").title())}</span></td>'
+            f'<td class="t-num">{sc}</td>'
+            f'</tr>\n'
+        )
+    return f"""
+  <section class="section">
+    <header><h2>Trigger breakdown</h2><span class="q">multi-trigger comparison</span></header>
+    <div class="body">
+      <table>
+        <thead><tr>
+          <th>Trigger</th><th>Status</th><th>Network</th>
+          <th class="t-num">Processes</th><th>Behavioral verdict</th>
+          <th class="t-num">Score</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </section>"""
+
+
 def build_html_report(  # noqa: C901
     report_dict: dict,
     *,
@@ -547,11 +665,12 @@ def build_html_report(  # noqa: C901
     narrative       = report_dict.get("narrative", [])
     breakdown       = report_dict.get("score_breakdown", {})
 
-    phases_detail = report_dict.get("_phases_detail", {})
-    network       = report_dict.get("_network", {})
-    telemetry     = report_dict.get("_telemetry", {})
-    correlations  = report_dict.get("_correlations", {})
-    run_detail    = report_dict.get("_run", pkg)
+    phases_detail    = report_dict.get("_phases_detail", {})
+    network          = report_dict.get("_network", {})
+    telemetry        = report_dict.get("_telemetry", {})
+    correlations     = report_dict.get("_correlations", {})
+    run_detail       = report_dict.get("_run", pkg)
+    trigger_verdicts = report_dict.get("_trigger_verdicts") or report_dict.get("trigger_verdicts", [])
 
     eco     = pkg.get("ecosystem") or "?"
     name    = pkg.get("name")      or "?"
@@ -1292,6 +1411,8 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </section>
   {diff_section}
+  {_build_trigger_breakdown_section(trigger_verdicts, e, _VERDICT_COLOR)}
+
   <section class="section">
     <header><h2>Phase summary</h2><span class="q">execution lifecycle</span></header>
     <div class="body">

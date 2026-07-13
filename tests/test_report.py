@@ -940,4 +940,150 @@ class TestExportBundle:
         rep  = build_report(norm)
         html = build_html_report(rep, artifact_prefix="artifacts/")
         assert "artifacts/run.json" in html
+
+
+# ── Feature 2: trigger verdicts ───────────────────────────────────────────────
+
+def _minimal_run_with_triggers(tmp_path: Path, triggers: list | None = None) -> None:
+    run: dict = {
+        "ecosystem": "pypi",
+        "name": "requests",
+        "version": "2.28.0",
+        "phases": {
+            "install": {"status": "ok", "exit_code": 0, "duration_secs": 1.2,
+                        "process_activity": {"process_count": 2,
+                                              "suspicious_execs": [],
+                                              "sensitive_file_accesses": [],
+                                              "any_suspicious": False}},
+            "import":  {"status": "ok", "exit_code": 0, "duration_secs": 0.3,
+                        "process_activity": {"process_count": 1,
+                                              "suspicious_execs": [],
+                                              "sensitive_file_accesses": [],
+                                              "any_suspicious": False}},
+        },
+        "triggers": triggers or [],
+    }
+    (tmp_path / "run.json").write_text(json.dumps(run), encoding="utf-8")
+
+
+class TestTriggerVerdicts:
+    def test_trigger_verdicts_empty_when_no_triggers(self, tmp_path: Path):
+        _minimal_run(tmp_path)
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        assert rep["trigger_verdicts"] == []
+
+    def test_trigger_verdicts_present_when_triggers_in_run_json(self, tmp_path: Path):
+        _minimal_run_with_triggers(tmp_path, triggers=[
+            {"trigger_id": "install",     "phase_label": "Install",
+             "status": "ok", "t_start": 1000.0, "t_end": 1002.0,
+             "exit_code": 0, "timed_out": False,
+             "network_activity": False, "process_activity": {}, "skip_reason": None},
+            {"trigger_id": "import_root", "phase_label": "Import (root)",
+             "status": "ok", "t_start": 1002.0, "t_end": 1002.5,
+             "exit_code": 0, "timed_out": False,
+             "network_activity": False, "process_activity": {}, "skip_reason": None},
+        ])
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        assert len(rep["trigger_verdicts"]) == 2
+
+    def test_trigger_verdict_fields(self, tmp_path: Path):
+        _minimal_run_with_triggers(tmp_path, triggers=[
+            {"trigger_id": "install", "phase_label": "Install",
+             "status": "ok", "t_start": 1000.0, "t_end": 1002.0,
+             "exit_code": 0, "timed_out": False,
+             "network_activity": False, "process_activity": {}, "skip_reason": None},
+        ])
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        tv = rep["trigger_verdicts"][0]
+        for key in ("trigger_id", "phase_label", "status", "behavioral_verdict",
+                    "score", "network_activity", "indicators"):
+            assert key in tv, f"trigger_verdict missing key: {key}"
+
+    def test_top_level_verdict_present_regardless_of_triggers(self, tmp_path: Path):
+        _minimal_run(tmp_path)
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        assert "behavioral_verdict" in rep
+        assert "score" in rep
+
+    def test_trigger_verdicts_in_normalized_triggers(self, tmp_path: Path):
+        triggers = [
+            {"trigger_id": "install", "phase_label": "Install",
+             "status": "ok", "t_start": 1000.0, "t_end": 1002.0,
+             "exit_code": 0, "timed_out": False,
+             "network_activity": False, "process_activity": {}, "skip_reason": None},
+        ]
+        _minimal_run_with_triggers(tmp_path, triggers=triggers)
+        norm = normalize(tmp_path)
+        assert "triggers" in norm
+        assert norm["triggers"] == triggers
+
+
+class TestHtmlTriggerBreakdown:
+    def _rep_with_triggers(self, trigger_verdicts: list) -> dict:
+        return {
+            "package":            {"ecosystem": "pypi", "name": "pkg", "version": "1.0"},
+            "verdict":            "no_malicious_behavior_observed",
+            "behavioral_verdict": "no_malicious_behavior_observed",
+            "advisory_status":    "none",
+            "verdict_basis":      "dynamic",
+            "advisory":           {},
+            "score":              0,
+            "confidence":         0.0,
+            "attack_tactics":     [],
+            "techniques":         [],
+            "indicators":         [],
+            "narrative":          ["No suspicious behavior detected."],
+            "score_breakdown":    {"items": [], "combo_bonus": 0, "total": 0},
+            "summary":            {"indicator_count": 0, "critical": 0,
+                                   "high": 0, "medium": 0, "low": 0},
+            "trigger_verdicts":   trigger_verdicts,
+            "_trigger_verdicts":  trigger_verdicts,
+            "phases":             {},
+            "event_counts":       {},
+            "metadata":           {},
+            "diff":               None,
+            "_run":               {"run_dir": ""},
+            "_phases_detail":     {},
+            "_network":           {},
+            "_telemetry":         {},
+            "_correlations":      {},
+        }
+
+    def test_trigger_breakdown_absent_when_no_triggers(self):
+        html = build_html_report(self._rep_with_triggers([]))
+        assert "Trigger breakdown" not in html
+
+    def test_trigger_breakdown_present_when_triggers_exist(self):
+        tvs = [
+            {"trigger_id": "install", "phase_label": "Install",
+             "status": "ok", "network_activity": False,
+             "process_activity": {"process_count": 2, "any_suspicious": False},
+             "behavioral_verdict": "no_malicious_behavior_observed", "score": 0,
+             "indicators": []},
+            {"trigger_id": "import_root", "phase_label": "Import (root)",
+             "status": "ok", "network_activity": False,
+             "process_activity": {"process_count": 1, "any_suspicious": False},
+             "behavioral_verdict": "no_malicious_behavior_observed", "score": 0,
+             "indicators": []},
+        ]
+        html = build_html_report(self._rep_with_triggers(tvs))
+        assert "Trigger breakdown" in html
+        assert "install" in html
+        assert "import_root" in html
+
+    def test_trigger_breakdown_shows_network_activity(self):
+        tvs = [
+            {"trigger_id": "install", "phase_label": "Install",
+             "status": "ok", "network_activity": True,
+             "process_activity": {},
+             "behavioral_verdict": "suspicious", "score": 30,
+             "indicators": []},
+        ]
+        html = build_html_report(self._rep_with_triggers(tvs))
+        assert "Trigger breakdown" in html
+        assert "yes" in html  # network_activity=True renders as "yes"
         assert "file:///" not in html

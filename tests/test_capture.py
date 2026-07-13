@@ -931,6 +931,142 @@ class TestRunOrchestrator:
         assert (run_dir / "install.json").exists()
 
 
+# ── Feature 2: multi-trigger matrix ─────────────────────────────────────────
+
+class TestRunWithTriggers:
+    """Tests for the trigger_plans parameter and the triggers list in run.json."""
+
+    def test_triggers_list_present_in_output(self, fake_artifact, tmp_path):
+        result = _run_mocked(fake_artifact, tmp_path)
+        assert "triggers" in result
+        assert isinstance(result["triggers"], list)
+
+    def test_default_triggers_are_install_and_import_root(self, fake_artifact, tmp_path):
+        result = _run_mocked(fake_artifact, tmp_path)
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert tids == ["install", "import_root"]
+
+    def test_triggers_list_has_required_fields(self, fake_artifact, tmp_path):
+        result = _run_mocked(fake_artifact, tmp_path)
+        for trig in result["triggers"]:
+            for key in ("trigger_id", "phase_label", "status", "t_start", "t_end",
+                        "exit_code", "timed_out", "network_activity", "process_activity"):
+                assert key in trig, f"trigger {trig['trigger_id']} missing {key}"
+
+    def test_phases_shim_populated_from_default_triggers(self, fake_artifact, tmp_path):
+        result = _run_mocked(fake_artifact, tmp_path)
+        assert "install" in result["phases"]
+        assert "import"  in result["phases"]
+        assert result["phases"]["install"]["status"] == "ok"
+        assert result["phases"]["import"]["status"]  == "ok"
+
+    def test_install_with_deps_trigger_id_in_output(self, fake_artifact, tmp_path):
+        result = _run_mocked(fake_artifact, tmp_path, with_deps=True)
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert "install_with_deps" in tids
+        assert "install" not in tids
+        assert result["sandbox_meta"]["install_deps_enabled"] is True
+
+    def test_custom_trigger_plans_replace_defaults(self, fake_artifact, tmp_path):
+        from pkgids.triggers import TriggerPlan
+        from pkgids.capture import _install_command
+
+        run_dir = tmp_path / "run"
+        plans = [
+            TriggerPlan(
+                trigger_id="install",
+                phase_label="Install",
+                command=tuple(_install_command("pypi", "six-1.16.0.tar.gz")),
+                timeout=120,
+            ),
+        ]
+        p = _patch_all(fake_artifact, run_dir)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+            result = run("pypi", "six", "1.16.0", run_dir=run_dir,
+                         trigger_plans=plans,
+                         post_install_idle_secs=0,
+                         post_import_idle_secs=0)
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert tids == ["install"]
+        # phases["import"] is missing from plans → fallback skipped entry
+        assert result["phases"]["import"]["status"] == "skipped"
+        assert result["phases"]["import"]["reason"] == "skip_import"
+
+    def test_dependency_skipping_with_install_failed(self, fake_artifact, tmp_path):
+        from pkgids.triggers import TriggerPlan
+
+        run_dir = tmp_path / "run"
+        plans = [
+            TriggerPlan(
+                trigger_id="install",
+                phase_label="Install",
+                command=("echo", "install"),
+                timeout=30,
+            ),
+            TriggerPlan(
+                trigger_id="import_root",
+                phase_label="Import (root)",
+                command=("echo", "import"),
+                timeout=30,
+                requires=("install",),
+                dependency_skip_reason="install_failed",
+            ),
+        ]
+        failed = {**_fake_exec_result(), "exit_code": 1, "stderr": "boom"}
+        with (
+            patch("pkgids.capture.fetch",                   return_value=fake_artifact),
+            patch("pkgids.capture.start_sandbox_container", return_value=_fake_sandbox_start()),
+            patch("pkgids.capture.exec_in_sandbox",         return_value=failed),
+            patch("pkgids.capture.stop_sandbox_container"),
+            patch("pkgids.capture._detonet_bridge_iface",   return_value="br-abc"),
+            patch("pkgids.capture._start_tcpdump",          return_value=MagicMock()),
+            patch("pkgids.capture._stop_tcpdump"),
+            patch("pkgids.capture._read_phase_entries",     return_value=[]),
+            patch("pkgids.capture.read_container_file",     return_value=None),
+        ):
+            result = run("pypi", "six", "1.16.0", run_dir=run_dir,
+                         trigger_plans=plans,
+                         post_install_idle_secs=0,
+                         post_import_idle_secs=0)
+
+        install_trig = next(t for t in result["triggers"] if t["trigger_id"] == "install")
+        import_trig  = next(t for t in result["triggers"] if t["trigger_id"] == "import_root")
+        assert install_trig["status"] == "failed"
+        assert import_trig["status"]  == "skipped"
+        assert result["phases"]["import"]["status"] == "skipped"
+        assert result["phases"]["import"]["reason"] == "install_failed"
+        assert result["outputs"]["import_json"] is None
+
+    def test_skip_import_on_install_failure_uses_builtin_reason(self, fake_artifact, tmp_path):
+        """Built-in skip_import_on_install_failure preserves the legacy 'install_failed' reason."""
+        run_dir = tmp_path / "run"
+        failed = {**_fake_exec_result(), "exit_code": 1, "stderr": "fail"}
+        with (
+            patch("pkgids.capture.fetch",                   return_value=fake_artifact),
+            patch("pkgids.capture.start_sandbox_container", return_value=_fake_sandbox_start()),
+            patch("pkgids.capture.exec_in_sandbox",         return_value=failed),
+            patch("pkgids.capture.stop_sandbox_container"),
+            patch("pkgids.capture._detonet_bridge_iface",   return_value="br-abc"),
+            patch("pkgids.capture._start_tcpdump",          return_value=MagicMock()),
+            patch("pkgids.capture._stop_tcpdump"),
+            patch("pkgids.capture._read_phase_entries",     return_value=[]),
+            patch("pkgids.capture.read_container_file",     return_value=None),
+        ):
+            result = run("pypi", "six", "1.16.0", run_dir=run_dir,
+                         skip_import_on_install_failure=True,
+                         post_install_idle_secs=0,
+                         post_import_idle_secs=0)
+        assert result["phases"]["install"]["status"] == "failed"
+        assert result["phases"]["import"]["status"]  == "skipped"
+        assert result["phases"]["import"]["reason"]  == "install_failed"
+
+    def test_trigger_network_activity_reflects_entries(self, fake_artifact, tmp_path):
+        entry = {"ts": 1000.0, "type": "dns", "query": "evil.com"}
+        result = _run_mocked(fake_artifact, tmp_path, phase_entries=[entry])
+        install_trig = next(t for t in result["triggers"] if t["trigger_id"] == "install")
+        assert install_trig["network_activity"] is True
+
+
 # ── CLI integration tests ─────────────────────────────────────────────────────
 
 class TestCLIDetonate:
