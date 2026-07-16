@@ -347,7 +347,11 @@ def cmd_detonate(args: argparse.Namespace) -> int:
     skip_import = True if args.skip_import else None
 
     # Build explicit trigger plans when --trigger flags are provided.
-    trigger_plans = None
+    # import_submodule is handled separately: its command requires runtime discovery
+    # (the submodule name is unknown until the artifact is fetched), so it is extracted
+    # from the explicit list and passed as include_submodule=True to run() instead.
+    trigger_plans  = None
+    include_submodule = False
     if args.triggers:
         unsupported = [t for t in args.triggers if t not in SUPPORTED_TRIGGER_IDS]
         if unsupported:
@@ -358,27 +362,31 @@ def cmd_detonate(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        include_submodule = "import_submodule" in args.triggers
+        explicit_tids = [t for t in args.triggers if t != "import_submodule"]
         # Build plans in the order the user specified them; post_delay defaults to 0.
         _label_map = {
             "install":           "Install",
             "install_with_deps": "Install (with deps)",
             "import_root":       "Import (root)",
+            "import_submodule":  "Import (submodule)",
         }
-        trigger_plans = []
-        for tid in args.triggers:
-            if "install" in tid:
-                with_deps = tid == "install_with_deps"
-                cmd = tuple(_install_command(args.ecosystem, "<artifact>", with_deps=with_deps))
-                timeout = 120
-            else:
-                cmd = tuple(_import_command(args.ecosystem, args.name))
-                timeout = 30
-            trigger_plans.append(TriggerPlan(
-                trigger_id=tid,
-                phase_label=_label_map.get(tid, tid),
-                command=cmd,
-                timeout=timeout,
-            ))
+        if explicit_tids:
+            trigger_plans = []
+            for tid in explicit_tids:
+                if "install" in tid:
+                    with_deps = tid == "install_with_deps"
+                    cmd = tuple(_install_command(args.ecosystem, "<artifact>", with_deps=with_deps))
+                    timeout = 120
+                else:
+                    cmd = tuple(_import_command(args.ecosystem, args.name))
+                    timeout = 30
+                trigger_plans.append(TriggerPlan(
+                    trigger_id=tid,
+                    phase_label=_label_map.get(tid, tid),
+                    command=cmd,
+                    timeout=timeout,
+                ))
 
     try:
         summary = _run(
@@ -387,6 +395,7 @@ def cmd_detonate(args: argparse.Namespace) -> int:
             skip_import=skip_import,
             with_deps=bool(args.with_deps),
             trigger_plans=trigger_plans,
+            include_submodule=include_submodule,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 SUPPORTED_TRIGGER_IDS: frozenset[str] = frozenset({
     "install",
     "import_root",
+    "import_submodule",
     "install_with_deps",
 })
 

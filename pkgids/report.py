@@ -425,6 +425,7 @@ def build_report(normalized: dict) -> dict:
         "install":           "install",
         "install_with_deps": "install",
         "import_root":       "import",
+        "import_submodule":  "import",
     }
     tel         = normalized.get("telemetry", {})
     net         = normalized.get("network", {})

@@ -394,10 +394,30 @@ def _clear_fakeinternet_logs(fi_logs_dir: Path) -> None:
 
 # Maps trigger_id → telemetry phase name used in telemetry.jsonl and install/import.json.
 # Must not change: report.py and indicators.py filter by these exact phase strings.
+# import_submodule shares "import" so telemetry.jsonl schema stays unchanged.
 _TRIGGER_TO_TEL_PHASE: dict[str, str] = {
     "install":           "install",
     "install_with_deps": "install",
     "import_root":       "import",
+    "import_submodule":  "import",
+}
+
+# Maps trigger_id → key written into run.json["phases"].
+# Absent entries fall back to trigger_id, giving import_submodule its own phases key.
+_TRIGGER_TO_PHASES_KEY: dict[str, str] = {
+    "install":           "install",
+    "install_with_deps": "install",
+    "import_root":       "import",
+    # import_submodule absent → falls back to "import_submodule"
+}
+
+# Maps trigger_id → output JSON file stem inside run_dir.
+# Absent entries fall back to trigger_id, preventing import.json collision.
+_TRIGGER_TO_PHASE_FILE: dict[str, str] = {
+    "install":           "install",
+    "install_with_deps": "install",
+    "import_root":       "import",
+    # import_submodule absent → falls back to "import_submodule"
 }
 
 # Maps trigger_id → idle phase name written to run.json["phases"] for backward compat.
@@ -405,7 +425,62 @@ _TRIGGER_TO_IDLE_PHASE: dict[str, str] = {
     "install":           "post_install_idle",
     "install_with_deps": "post_install_idle",
     "import_root":       "post_import_idle",
+    # import_submodule absent → no idle phase (post_delay silently skipped)
 }
+
+
+def _import_submodule_command(submod_dotted: str) -> list[str]:
+    """Build the sandbox exec command to import one PyPI submodule."""
+    return [
+        "python3", "-c",
+        f"import sys; sys.path.insert(0, '/scratch/site-packages'); import {submod_dotted}",
+    ]
+
+
+def _discover_submodule(artifact: Path, top_module: str, ecosystem: str) -> str | None:
+    """Return the dotted name of one public PyPI submodule, or None.
+
+    Reads file names from artifact.parent/metadata.json (written by fetch.py) when
+    available; falls back to reading archive members from the tarball directly.
+
+    Handles both standard layout (pkg-1.0/pkg/utils.py) and src-layout
+    (pkg-1.0/src/pkg/utils.py) by scanning all path segments: any segment equal to
+    top_module followed by a .py file is a candidate.  Private modules (leading ``_``)
+    are excluded.  Returns the first match in alphabetical order, or None when the
+    package has no public top-level submodules (e.g. single-file packages like six).
+
+    Always returns None for npm — npm has no standardised submodule-import convention.
+    Always returns None on any unexpected error (fail-graceful).
+    """
+    if ecosystem != "pypi":
+        return None
+    try:
+        meta_path = artifact.parent / "metadata.json"
+        if meta_path.exists():
+            files: list[str] = json.loads(meta_path.read_text(errors="replace")).get("files", [])
+        else:
+            files = _archive_members(artifact)
+
+        candidates: list[str] = []
+        for member in files:
+            # Normalise separators and split into path segments.
+            parts = member.replace("\\", "/").split("/")
+            # Scan every consecutive (segment, next_segment) pair.
+            for i in range(len(parts) - 1):
+                if parts[i] != top_module:
+                    continue
+                stem_py = parts[i + 1]
+                if not stem_py.endswith(".py"):
+                    continue
+                stem = stem_py[:-3]
+                # Skip private, dunder, and known metadata files.
+                if stem.startswith("_"):
+                    continue
+                candidates.append(f"{top_module}.{stem}")
+        candidates.sort()
+        return candidates[0] if candidates else None
+    except Exception:
+        return None
 
 
 def _build_trigger_plans(
@@ -505,7 +580,8 @@ def _run_trigger(
         tel_phase, cmd, raw, t0, t1, capture_log, entries,
         process_activity=process_activity,
     )
-    (run_dir / f"{tel_phase}.json").write_text(json.dumps(phase_record, indent=2))
+    file_stem = _TRIGGER_TO_PHASE_FILE.get(plan.trigger_id, plan.trigger_id)
+    (run_dir / f"{file_stem}.json").write_text(json.dumps(phase_record, indent=2))
 
     status = _phase_status(raw, tel_phase)
     result = TriggerResult(
@@ -549,8 +625,9 @@ def _trigger_to_phase_entry(
     telemetry_limited: bool,
 ) -> dict:
     """Build a phases-shim entry from a completed (non-skipped) TriggerResult."""
+    phases_key = _TRIGGER_TO_PHASES_KEY.get(result.trigger_id, result.trigger_id)
     return {
-        "phase":             _TRIGGER_TO_TEL_PHASE.get(result.trigger_id, result.trigger_id),
+        "phase":             phases_key,
         "status":            result.status,
         "t_start":           result.t_start,
         "t_end":             result.t_end,
@@ -577,6 +654,7 @@ def run(
     skip_import_on_install_failure: bool | None = None,
     with_deps: bool = False,
     trigger_plans: list[TriggerPlan] | None = None,
+    include_submodule: bool = False,
 ) -> dict:
     """Full detonation pipeline for one package.
 
@@ -696,6 +774,28 @@ def run(
             post_install_secs=eff_post_install_secs,
             post_import_secs=eff_post_import_secs,
         )
+
+    # Optionally discover and append an import_submodule trigger (PyPI only).
+    if include_submodule:
+        trigger_plans = list(trigger_plans)
+        top_mod = _top_module_name(ecosystem, name)
+        submod = _discover_submodule(artifact, top_mod, ecosystem)
+        if submod:
+            print(f"[detonate] import_submodule discovered: {submod}", flush=True)
+            trigger_plans.append(TriggerPlan(
+                trigger_id="import_submodule",
+                phase_label="Import (submodule)",
+                command=tuple(_import_submodule_command(submod)),
+                timeout=30,
+                post_delay=0,
+                requires=("import_root",),
+                dependency_skip_reason="import_root_failed",
+            ))
+        else:
+            print(
+                f"[detonate] import_submodule: no public submodule found for {top_mod!r}; skipping",
+                flush=True,
+            )
 
     _install_plan = next((p for p in trigger_plans if "install" in p.trigger_id), None)
     _import_plan  = next((p for p in trigger_plans if p.trigger_id == "import_root"), None)
@@ -844,14 +944,14 @@ def run(
         phases["startup"] = _phase_summary(startup_record)
 
     for t_result, post_record in zip(trigger_results, post_delay_records):
-        tel_phase = _TRIGGER_TO_TEL_PHASE.get(t_result.trigger_id, t_result.trigger_id)
+        phases_key = _TRIGGER_TO_PHASES_KEY.get(t_result.trigger_id, t_result.trigger_id)
         if t_result.status == "skipped":
-            phases[tel_phase] = {
+            phases[phases_key] = {
                 "status": "skipped",
                 "reason": t_result.skip_reason or t_result.trigger_id,
             }
         else:
-            phases[tel_phase] = _trigger_to_phase_entry(t_result, telemetry_limited=tel_limited)
+            phases[phases_key] = _trigger_to_phase_entry(t_result, telemetry_limited=tel_limited)
 
         if post_record:
             idle_phase = _TRIGGER_TO_IDLE_PHASE.get(t_result.trigger_id)
@@ -904,9 +1004,10 @@ def run(
         ),
     }
 
-    install_json_path    = run_dir / "install.json"
-    import_json_path     = run_dir / "import.json"
-    telemetry_jsonl_path = run_dir / "telemetry.jsonl"
+    install_json_path         = run_dir / "install.json"
+    import_json_path          = run_dir / "import.json"
+    import_submodule_json_path = run_dir / "import_submodule.json"
+    telemetry_jsonl_path      = run_dir / "telemetry.jsonl"
     summary: dict = {
         "ecosystem":        ecosystem,
         "name":             name,
@@ -918,11 +1019,12 @@ def run(
         "triggers":         triggers_list,
         "network_activity": network_activity,
         "outputs": {
-            "install_json":    str(install_json_path)    if install_json_path.exists()    else None,
-            "import_json":     str(import_json_path)     if import_json_path.exists()     else None,
-            "network_jsonl":   str(network_jsonl)         if network_jsonl.exists()        else None,
-            "telemetry_jsonl": str(telemetry_jsonl_path) if telemetry_jsonl_path.exists() else None,
-            "capture_pcap":    str(pcap_path)             if pcap_path.exists()           else None,
+            "install_json":          str(install_json_path)          if install_json_path.exists()          else None,
+            "import_json":           str(import_json_path)           if import_json_path.exists()           else None,
+            "import_submodule_json": str(import_submodule_json_path) if import_submodule_json_path.exists() else None,
+            "network_jsonl":         str(network_jsonl)               if network_jsonl.exists()              else None,
+            "telemetry_jsonl":       str(telemetry_jsonl_path)       if telemetry_jsonl_path.exists()       else None,
+            "capture_pcap":          str(pcap_path)                  if pcap_path.exists()                  else None,
         },
     }
     (run_dir / "run.json").write_text(json.dumps(summary, indent=2))

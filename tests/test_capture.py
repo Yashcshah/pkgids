@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pkgids.capture import (
+    _discover_submodule,
     _has_network,
     _import_command,
     _install_command,
@@ -1154,3 +1155,231 @@ def test_detonate_pypi_six_e2e(tmp_path):
     # sandbox_meta must be populated
     assert result["sandbox_meta"]["container_name"] is not None
     assert result["sandbox_meta"]["module_name"] == "six"
+
+
+# ── Feature 2 v1.6: import_submodule trigger ─────────────────────────────────
+
+class TestDiscoverSubmodule:
+    """Unit tests for _discover_submodule() — pure static analysis, no sandbox."""
+
+    def _make_artifact(self, tmp_path: Path, files: list[str]) -> Path:
+        """Write a fake artifact + metadata.json so _discover_submodule can read the files list."""
+        d = tmp_path / "pkg-1.0"
+        d.mkdir(parents=True)
+        art = d / "pkg-1.0.tar.gz"
+        art.write_bytes(b"fake")
+        (d / "metadata.json").write_text(json.dumps({"files": files}))
+        return art
+
+    def test_finds_first_public_submodule_alphabetically(self, tmp_path):
+        art = self._make_artifact(tmp_path, [
+            "requests-2.0/requests/__init__.py",
+            "requests-2.0/requests/adapters.py",
+            "requests-2.0/requests/auth.py",
+            "requests-2.0/requests/utils.py",
+        ])
+        assert _discover_submodule(art, "requests", "pypi") == "requests.adapters"
+
+    def test_returns_none_for_single_file_package(self, tmp_path):
+        art = self._make_artifact(tmp_path, [
+            "six-1.16.0/six.py",
+        ])
+        assert _discover_submodule(art, "six", "pypi") is None
+
+    def test_skips_private_modules(self, tmp_path):
+        art = self._make_artifact(tmp_path, [
+            "mypkg-1.0/mypkg/__init__.py",
+            "mypkg-1.0/mypkg/_internal.py",
+            "mypkg-1.0/mypkg/_compat.py",
+        ])
+        assert _discover_submodule(art, "mypkg", "pypi") is None
+
+    def test_skips_dunder_modules(self, tmp_path):
+        art = self._make_artifact(tmp_path, [
+            "mypkg-1.0/mypkg/__init__.py",
+            "mypkg-1.0/mypkg/__main__.py",
+            "mypkg-1.0/mypkg/__version__.py",
+        ])
+        assert _discover_submodule(art, "mypkg", "pypi") is None
+
+    def test_src_layout_flat_py(self, tmp_path):
+        """src-layout packages: members under src/ must still be discovered."""
+        art = self._make_artifact(tmp_path, [
+            "mypkg-1.0/src/mypkg/__init__.py",
+            "mypkg-1.0/src/mypkg/utils.py",
+        ])
+        assert _discover_submodule(art, "mypkg", "pypi") == "mypkg.utils"
+
+    def test_src_layout_multiple_submodules_returns_first_alphabetically(self, tmp_path):
+        art = self._make_artifact(tmp_path, [
+            "mypkg-1.0/src/mypkg/__init__.py",
+            "mypkg-1.0/src/mypkg/zoo.py",
+            "mypkg-1.0/src/mypkg/alpha.py",
+        ])
+        assert _discover_submodule(art, "mypkg", "pypi") == "mypkg.alpha"
+
+    def test_returns_none_for_npm(self, tmp_path):
+        art = self._make_artifact(tmp_path, [
+            "package/lib/index.js",
+            "package/lib/utils.js",
+        ])
+        assert _discover_submodule(art, "mypackage", "npm") is None
+
+    def test_returns_none_when_metadata_absent_and_not_a_real_archive(self, tmp_path):
+        """Falls back to _archive_members; returns None gracefully when tarball is fake."""
+        d = tmp_path / "pkg-1.0"
+        d.mkdir()
+        art = d / "pkg-1.0.tar.gz"
+        art.write_bytes(b"not a real tarball")
+        # metadata.json absent, tarball unreadable → must return None, not raise
+        assert _discover_submodule(art, "pkg", "pypi") is None
+
+    def test_returns_none_for_namespace_package_style_no_public_top_level(self, tmp_path):
+        """Namespace packages with deep hierarchy but no direct submodule under top_module."""
+        art = self._make_artifact(tmp_path, [
+            "mypkg-1.0/mypkg/__init__.py",
+            # subpackage directory — no .py files at depth 1 below mypkg
+            "mypkg-1.0/mypkg/sub/__init__.py",
+        ])
+        assert _discover_submodule(art, "mypkg", "pypi") is None
+
+
+class TestImportSubmoduleTrigger:
+    """Tests for the include_submodule=True flow in run()."""
+
+    def _make_requests_artifact(self, tmp_path: Path) -> Path:
+        d = tmp_path / "artifacts" / "pypi" / "requests-2.0"
+        d.mkdir(parents=True)
+        art = d / "requests-2.0.tar.gz"
+        art.write_bytes(b"fake")
+        (d / "metadata.json").write_text(json.dumps({"files": [
+            "requests-2.0/requests/__init__.py",
+            "requests-2.0/requests/adapters.py",
+            "requests-2.0/requests/auth.py",
+        ]}))
+        return art
+
+    def test_import_submodule_trigger_added_when_submodule_found(self, tmp_path):
+        art = self._make_requests_artifact(tmp_path)
+        run_dir = tmp_path / "run"
+        p = _patch_all(art, run_dir)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+            result = run("pypi", "requests", "2.0", run_dir=run_dir,
+                         include_submodule=True,
+                         post_install_idle_secs=0, post_import_idle_secs=0)
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert "import_submodule" in tids
+        assert tids == ["install", "import_root", "import_submodule"]
+
+    def test_import_submodule_omitted_when_no_submodule_found(self, fake_artifact, tmp_path):
+        """single-file package (six.py) → no submodule discovered → triggers unchanged."""
+        (fake_artifact.parent / "metadata.json").write_text(json.dumps({"files": [
+            "six-1.16.0/six.py",
+        ]}))
+        result = _run_mocked(fake_artifact, tmp_path, include_submodule=True)
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert "import_submodule" not in tids
+        assert tids == ["install", "import_root"]
+
+    def test_phases_import_key_still_present_alongside_import_submodule(self, tmp_path):
+        """import_root owns phases["import"]; import_submodule gets phases["import_submodule"]."""
+        art = self._make_requests_artifact(tmp_path)
+        run_dir = tmp_path / "run"
+        p = _patch_all(art, run_dir)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+            result = run("pypi", "requests", "2.0", run_dir=run_dir,
+                         include_submodule=True,
+                         post_install_idle_secs=0, post_import_idle_secs=0)
+        assert "import"            in result["phases"]
+        assert "import_submodule"  in result["phases"]
+        assert result["phases"]["import"]["status"]           == "ok"
+        assert result["phases"]["import_submodule"]["status"] == "ok"
+
+    def test_phases_import_and_import_submodule_are_separate_entries(self, tmp_path):
+        """The two phases entries must be distinct dicts with different phase labels."""
+        art = self._make_requests_artifact(tmp_path)
+        run_dir = tmp_path / "run"
+        p = _patch_all(art, run_dir)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+            result = run("pypi", "requests", "2.0", run_dir=run_dir,
+                         include_submodule=True,
+                         post_install_idle_secs=0, post_import_idle_secs=0)
+        assert result["phases"]["import"] is not result["phases"]["import_submodule"]
+        assert result["phases"]["import"]["phase"]           == "import"
+        assert result["phases"]["import_submodule"]["phase"] == "import_submodule"
+
+    def test_import_submodule_json_written_separately_from_import_json(self, tmp_path):
+        """import.json belongs to import_root; import_submodule.json is a distinct file."""
+        art = self._make_requests_artifact(tmp_path)
+        run_dir = tmp_path / "run"
+        p = _patch_all(art, run_dir)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+            run("pypi", "requests", "2.0", run_dir=run_dir,
+                include_submodule=True,
+                post_install_idle_secs=0, post_import_idle_secs=0)
+        assert (run_dir / "import.json").exists(),           "import.json missing"
+        assert (run_dir / "import_submodule.json").exists(), "import_submodule.json missing"
+
+    def test_import_submodule_skipped_when_import_root_fails(self, tmp_path):
+        """import_root failure must trigger dependency_skip on import_submodule."""
+        art = self._make_requests_artifact(tmp_path)
+        run_dir = tmp_path / "run"
+        call_n  = {"n": 0}
+        def side_effect(*args, **kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 2:  # import_root is 2nd exec
+                return {**_fake_exec_result(), "exit_code": 1,
+                        "stderr": "ModuleNotFoundError: No module named 'requests'"}
+            return _fake_exec_result()
+        with (
+            patch("pkgids.capture.fetch",                   return_value=art),
+            patch("pkgids.capture.start_sandbox_container", return_value=_fake_sandbox_start()),
+            patch("pkgids.capture.exec_in_sandbox",         side_effect=side_effect),
+            patch("pkgids.capture.stop_sandbox_container"),
+            patch("pkgids.capture._detonet_bridge_iface",   return_value="br-abc"),
+            patch("pkgids.capture._start_tcpdump",          return_value=MagicMock()),
+            patch("pkgids.capture._stop_tcpdump"),
+            patch("pkgids.capture._read_phase_entries",     return_value=[]),
+            patch("pkgids.capture.read_container_file",     return_value=None),
+        ):
+            result = run("pypi", "requests", "2.0", run_dir=run_dir,
+                         include_submodule=True,
+                         post_install_idle_secs=0, post_import_idle_secs=0)
+        import_root_t = next(t for t in result["triggers"] if t["trigger_id"] == "import_root")
+        submodule_t   = next(t for t in result["triggers"] if t["trigger_id"] == "import_submodule")
+        assert import_root_t["status"] in ("failed", "module_not_found")
+        assert submodule_t["status"]   == "skipped"
+        assert submodule_t["skip_reason"] == "import_root_failed"
+
+    def test_src_layout_submodule_is_discovered_and_run(self, tmp_path):
+        """src-layout artifacts must yield an import_submodule trigger."""
+        d = tmp_path / "artifacts" / "pypi" / "mypkg-1.0"
+        d.mkdir(parents=True)
+        art = d / "mypkg-1.0.tar.gz"
+        art.write_bytes(b"fake")
+        (d / "metadata.json").write_text(json.dumps({"files": [
+            "mypkg-1.0/src/mypkg/__init__.py",
+            "mypkg-1.0/src/mypkg/utils.py",
+        ]}))
+        run_dir = tmp_path / "run"
+        p = _patch_all(art, run_dir)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+            result = run("pypi", "mypkg", "1.0", run_dir=run_dir,
+                         include_submodule=True,
+                         post_install_idle_secs=0, post_import_idle_secs=0)
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert "import_submodule" in tids
+        # confirm the discovered submodule is mypkg.utils
+        submod_plan_cmd = next(
+            t for t in result["triggers"] if t["trigger_id"] == "import_submodule"
+        )
+        # import_submodule.json captures the command used
+        sub_json = json.loads((run_dir / "import_submodule.json").read_text())
+        assert "mypkg.utils" in " ".join(sub_json["command"])
+
+    def test_default_run_unaffected_when_include_submodule_false(self, fake_artifact, tmp_path):
+        """include_submodule=False (default) must leave trigger list unchanged."""
+        result = _run_mocked(fake_artifact, tmp_path)  # include_submodule defaults to False
+        tids = [t["trigger_id"] for t in result["triggers"]]
+        assert "import_submodule" not in tids
+        assert tids == ["install", "import_root"]

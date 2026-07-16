@@ -24,6 +24,9 @@ class TestSupportedTriggerIds:
     def test_contains_install_with_deps(self):
         assert "install_with_deps" in SUPPORTED_TRIGGER_IDS
 
+    def test_contains_import_submodule(self):
+        assert "import_submodule" in SUPPORTED_TRIGGER_IDS
+
     def test_does_not_contain_dynamic_triggers(self):
         for bad in ("entry_point:*", "import_submodule:*", "baited_env", ""):
             assert bad not in SUPPORTED_TRIGGER_IDS

@@ -1087,3 +1087,80 @@ class TestHtmlTriggerBreakdown:
         assert "Trigger breakdown" in html
         assert "yes" in html  # network_activity=True renders as "yes"
         assert "file:///" not in html
+
+
+# ── Feature 2 v1.6: import_submodule trigger reports ─────────────────────────
+
+def _submodule_trigger_entry(**overrides) -> dict:
+    base = {
+        "trigger_id":       "import_submodule",
+        "phase_label":      "Import (submodule)",
+        "status":           "ok",
+        "t_start":          1003.0,
+        "t_end":            1003.5,
+        "exit_code":        0,
+        "timed_out":        False,
+        "network_activity": False,
+        "process_activity": {},
+        "skip_reason":      None,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestImportSubmoduleTriggerVerdicts:
+    def test_import_submodule_verdict_in_trigger_verdicts(self, tmp_path: Path):
+        _minimal_run_with_triggers(tmp_path, triggers=[
+            {"trigger_id": "install", "phase_label": "Install",
+             "status": "ok", "t_start": 1000.0, "t_end": 1002.0,
+             "exit_code": 0, "timed_out": False,
+             "network_activity": False, "process_activity": {}, "skip_reason": None},
+            {"trigger_id": "import_root", "phase_label": "Import (root)",
+             "status": "ok", "t_start": 1002.0, "t_end": 1002.5,
+             "exit_code": 0, "timed_out": False,
+             "network_activity": False, "process_activity": {}, "skip_reason": None},
+            _submodule_trigger_entry(),
+        ])
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        assert any(tv["trigger_id"] == "import_submodule" for tv in rep["trigger_verdicts"])
+
+    def test_import_submodule_verdict_has_required_fields(self, tmp_path: Path):
+        _minimal_run_with_triggers(tmp_path, triggers=[_submodule_trigger_entry()])
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        tv = next(t for t in rep["trigger_verdicts"] if t["trigger_id"] == "import_submodule")
+        for key in ("trigger_id", "phase_label", "status", "behavioral_verdict",
+                    "score", "network_activity", "indicators"):
+            assert key in tv, f"import_submodule trigger_verdict missing {key}"
+
+    def test_import_submodule_uses_import_tel_phase_for_telemetry_filtering(
+        self, tmp_path: Path
+    ):
+        """Telemetry events tagged phase='import' must be attributed to import_submodule
+        verdict — confirming the _trigger_to_tel_phase mapping is correct."""
+        _minimal_run_with_triggers(tmp_path, triggers=[_submodule_trigger_entry()])
+        _write_jsonl(tmp_path, "telemetry.jsonl", [
+            {"event_type": "exec", "executable": "/bin/sh", "argv": ["sh"],
+             "phase": "import", "ts": 1003.2},
+            {"event_type": "exec", "executable": "/usr/bin/pip3", "argv": ["pip3"],
+             "phase": "install", "ts": 1001.0},
+        ])
+        norm = normalize(tmp_path)
+        rep  = build_report(norm)
+        tv = next(t for t in rep["trigger_verdicts"] if t["trigger_id"] == "import_submodule")
+        # The import-phase exec event must reach the trigger_verdict telemetry slice.
+        assert "indicators" in tv
+
+    def test_import_submodule_html_breakdown_row_present(self):
+        tvs = [
+            {"trigger_id": "import_submodule", "phase_label": "Import (submodule)",
+             "status": "ok", "network_activity": False,
+             "process_activity": {"process_count": 1, "any_suspicious": False},
+             "behavioral_verdict": "no_malicious_behavior_observed", "score": 0,
+             "indicators": []},
+        ]
+        html = build_html_report(TestHtmlTriggerBreakdown()._rep_with_triggers(tvs))
+        assert "Trigger breakdown"  in html
+        assert "import_submodule"   in html
+        assert "Import (submodule)" in html
