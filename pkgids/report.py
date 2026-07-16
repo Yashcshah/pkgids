@@ -971,6 +971,25 @@ def build_html_report(  # noqa: C901
     if diff:
         nd = ", ".join(e(d) for d in (diff.get("new_domains") or [])) or "none"
         np = ", ".join(str(p) for p in (diff.get("new_ports") or []))   or "none"
+        findings_list = diff.get("findings") or []
+        finding_rows = "".join(
+            f'<tr>'
+            f'<td><span class="sev-badge sev-{e(f.get("severity","low"))}">'
+            f'{e(f.get("severity","low"))}</span></td>'
+            f'<td class="finding-kind">{e(f.get("kind",""))}</td>'
+            f'<td class="finding-msg">{e(f.get("message",""))}</td>'
+            f'</tr>\n'
+            for f in findings_list[:10]
+        )
+        overflow_note = (
+            f'<p class="muted" style="font-size:11px;margin-top:6px">'
+            f'{e(str(len(findings_list) - 10))} more finding(s) — see diff.json</p>'
+            if len(findings_list) > 10 else ""
+        )
+        findings_table = (
+            f'<table class="diff-findings-table">{finding_rows}</table>{overflow_note}'
+            if findings_list else ""
+        )
         diff_section = f"""
   <section class="section">
     <header><h2>How does this differ from prior versions?</h2><span class="q">behavior delta</span></header>
@@ -982,6 +1001,7 @@ def build_html_report(  # noqa: C901
         <tr><td>New domains</td><td>{nd}</td></tr>
         <tr><td>New ports</td><td>{np}</td></tr>
       </table>
+      {findings_table}
     </div>
   </section>"""
 
@@ -1259,6 +1279,19 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
   color:var(--faint);letter-spacing:.04em}}
 /* diff */
 .diff-table td:first-child{{font-weight:600;color:var(--ink-2);width:130px}}
+.sev-badge{{font-size:10px;font-family:"IBM Plex Mono",monospace;font-weight:600;
+  letter-spacing:.04em;border-radius:4px;padding:2px 6px;text-transform:uppercase;white-space:nowrap}}
+.sev-badge.sev-critical{{background:var(--threat);color:#fff}}
+.sev-badge.sev-high{{background:#e67e22;color:#fff}}
+.sev-badge.sev-medium{{background:#f0b429;color:#1a1a1a}}
+.sev-badge.sev-low{{background:var(--tint);color:var(--ink-2)}}
+.diff-findings-table{{width:100%;border-collapse:collapse;margin-top:12px}}
+.diff-findings-table td{{padding:5px 8px;border-bottom:1px solid var(--line-2);font-size:12.5px;
+  vertical-align:top}}
+.diff-findings-table tr:last-child td{{border-bottom:none}}
+.diff-findings-table .finding-kind{{font-family:"IBM Plex Mono",monospace;font-size:11px;
+  color:var(--ink-2);white-space:nowrap;padding-right:12px}}
+.diff-findings-table .finding-msg{{color:var(--ink)}}
 /* footer */
 .report-footer{{display:flex;justify-content:space-between;align-items:center;gap:16px;
   margin-top:26px;padding-top:16px;border-top:1px solid var(--line);

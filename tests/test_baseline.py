@@ -419,3 +419,67 @@ class TestGetRollingBaseline:
 
         assert result["any_suspicious"] is False
         assert result["prediction"] == "benign"
+
+
+# ── import_submodule phase fields ─────────────────────────────────────────────
+
+class TestExtractProfileImportSubmodule:
+    def _summary_with_submod(
+        self,
+        status: str = "ok",
+        exit_code: int = 0,
+        duration: float = 0.4,
+        pa: dict | None = None,
+    ) -> dict:
+        s = _summary()
+        s["phases"]["import_submodule"] = {
+            "status":           status,
+            "exit_code":        exit_code,
+            "duration_secs":    duration,
+            "process_activity": pa or {},
+        }
+        return s
+
+    def test_fields_extracted_when_present(self):
+        p = extract_profile(self._summary_with_submod(status="ok", exit_code=0, duration=0.4))
+        assert p["import_submodule_status"]        == "ok"
+        assert p["import_submodule_exit_code"]     == 0
+        assert p["import_submodule_duration_secs"] == 0.4
+
+    def test_fields_none_when_absent(self):
+        p = extract_profile(_summary())
+        assert p["import_submodule_status"]        is None
+        assert p["import_submodule_exit_code"]     is None
+        assert p["import_submodule_duration_secs"] is None
+
+    def test_failed_status_captured(self):
+        p = extract_profile(self._summary_with_submod(status="failed", exit_code=1))
+        assert p["import_submodule_status"]    == "failed"
+        assert p["import_submodule_exit_code"] == 1
+
+    def test_subprocess_count_includes_submodule_pa(self):
+        p = extract_profile(self._summary_with_submod(pa=_pa(process_count=3)))
+        assert p["subprocess_count"] == 3
+
+    def test_subprocess_count_sums_all_three_phases(self):
+        s = _summary(install_pa=_pa(process_count=1), import_pa=_pa(process_count=1))
+        s["phases"]["import_submodule"] = {
+            "status": "ok", "exit_code": 0, "duration_secs": 0.1,
+            "process_activity": _pa(process_count=2),
+        }
+        assert extract_profile(s)["subprocess_count"] == 4
+
+    def test_suspicious_exec_count_includes_submodule_pa(self):
+        pa = _pa(suspicious_execs=[
+            {"executable": "/usr/bin/curl", "argv": ["curl", "http://x.com"], "pid": 10},
+        ])
+        p = extract_profile(self._summary_with_submod(pa=pa))
+        assert p["suspicious_exec_count"] == 1
+
+    def test_any_suspicious_from_submodule_pa(self):
+        p = extract_profile(self._summary_with_submod(pa=_pa(any_suspicious=True)))
+        assert p["any_suspicious"] is True
+
+    def test_any_suspicious_false_without_submodule_pa(self):
+        p = extract_profile(self._summary_with_submod(pa=_pa(any_suspicious=False)))
+        assert p["any_suspicious"] is False

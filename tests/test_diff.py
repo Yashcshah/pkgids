@@ -590,3 +590,58 @@ class TestIsObfuscated:
 
     def test_short_b64_like_string_not_flagged(self):
         assert not _is_obfuscated(["python3", "A" * 10])  # under 40 chars
+
+
+# ── import_submodule phase regression ────────────────────────────────────────
+
+class TestDiffImportSubmodulePhase:
+    def test_regression_detected_when_both_present(self):
+        old = {**_profile("1.0"), "import_submodule_status": "ok"}
+        new = {**_profile("1.1"), "import_submodule_status": "failed"}
+        r = diff_profiles(old, new)
+        f = _findings_of_kind(r, "import_submodule_status_regression")
+        assert len(f) == 1
+        assert f[0]["severity"] == "medium"
+
+    def test_finding_detail_contains_old_and_new(self):
+        old = {**_profile("1.0"), "import_submodule_status": "ok"}
+        new = {**_profile("1.1"), "import_submodule_status": "timed_out"}
+        r = diff_profiles(old, new)
+        f = _findings_of_kind(r, "import_submodule_status_regression")[0]
+        assert f["detail"]["old"] == "ok"
+        assert f["detail"]["new"] == "timed_out"
+
+    def test_no_finding_when_absent_in_both(self):
+        r = diff_profiles(_profile("1.0"), _profile("1.1"))
+        assert _findings_of_kind(r, "import_submodule_status_regression") == []
+
+    def test_no_finding_when_absent_in_old_present_ok_in_new(self):
+        # First run with import_submodule trigger — not a regression
+        new = {**_profile("1.1"), "import_submodule_status": "ok"}
+        r = diff_profiles(_profile("1.0"), new)
+        assert _findings_of_kind(r, "import_submodule_status_regression") == []
+
+    def test_no_finding_when_absent_in_old_and_failed_in_new(self):
+        # v1 design: absence in old → skip check entirely
+        new = {**_profile("1.1"), "import_submodule_status": "failed"}
+        r = diff_profiles(_profile("1.0"), new)
+        assert _findings_of_kind(r, "import_submodule_status_regression") == []
+
+    def test_no_finding_when_old_already_failed(self):
+        old = {**_profile("1.0"), "import_submodule_status": "failed"}
+        new = {**_profile("1.1"), "import_submodule_status": "failed"}
+        r = diff_profiles(old, new)
+        assert _findings_of_kind(r, "import_submodule_status_regression") == []
+
+    def test_no_finding_when_status_recovers(self):
+        old = {**_profile("1.0"), "import_submodule_status": "failed"}
+        new = {**_profile("1.1"), "import_submodule_status": "ok"}
+        r = diff_profiles(old, new)
+        assert _findings_of_kind(r, "import_submodule_status_regression") == []
+
+    def test_does_not_affect_existing_install_import_checks(self):
+        old = _profile("1.0", install_status="ok")
+        new = _profile("1.1", install_status="failed")
+        r = diff_profiles(old, new)
+        assert _findings_of_kind(r, "install_status_regression") != []
+        assert _findings_of_kind(r, "import_submodule_status_regression") == []

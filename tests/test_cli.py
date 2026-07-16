@@ -178,3 +178,139 @@ class TestScan:
         p.write_text("# only comments\n# nothing useful\n", encoding="utf-8")
         code = main(["scan", str(p), "--output-dir", str(tmp_path / "out")])
         assert code == 0
+
+
+# ── helpers shared by baseline/diff tests ────────────────────────────────────
+
+def _fake_profile(version: str = "1.0.0", prediction: str = "benign") -> dict:
+    return {
+        "id":                    1,
+        "version":               version,
+        "prediction":            prediction,
+        "any_suspicious":        False,
+        "network_domains":       [],
+        "network_hosts":         [],
+        "network_ports":         [],
+        "subprocess_count":      0,
+        "suspicious_exec_count": 0,
+        "sensitive_file_count":  0,
+        "shell_cmd_count":       0,
+        "new_file_count":        0,
+        "install_status":        "ok",
+        "import_status":         "ok",
+        "install_process_activity": None,
+        "import_process_activity":  None,
+    }
+
+
+class TestCmdBaseline:
+    def test_baseline_list_prints_versions(self, tmp_path, capsys):
+        from pkgids.cli import main
+        with patch("pkgids.baseline.list_versions",
+                   return_value=[_fake_profile("1.0.0"), _fake_profile("1.1.0")]):
+            code = main(["baseline", "list", "pypi", "requests"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "1.0.0" in out
+        assert "1.1.0" in out
+
+    def test_baseline_list_empty_exits_zero(self, capsys):
+        from pkgids.cli import main
+        with patch("pkgids.baseline.list_versions", return_value=[]):
+            code = main(["baseline", "list", "pypi", "requests"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "No baselines found" in out
+
+    def test_baseline_list_error_exits_nonzero(self, capsys):
+        from pkgids.cli import main
+        with patch("pkgids.baseline.list_versions",
+                   side_effect=RuntimeError("Supabase credentials missing")):
+            code = main(["baseline", "list", "pypi", "requests"])
+        assert code != 0
+        assert "error" in capsys.readouterr().err.lower()
+
+    def test_baseline_show_prints_json(self, tmp_path, capsys):
+        from pkgids.cli import main
+        with patch("pkgids.baseline.get_profile", return_value=_fake_profile("1.0.0")):
+            code = main(["baseline", "show", "pypi", "requests", "1.0.0"])
+        assert code == 0
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["version"] == "1.0.0"
+
+    def test_baseline_show_missing_version_exits_nonzero(self, capsys):
+        from pkgids.cli import main
+        with patch("pkgids.baseline.get_profile", return_value=None):
+            code = main(["baseline", "show", "pypi", "requests", "9.9.9"])
+        assert code != 0
+
+    def test_baseline_no_subcommand_exits_nonzero(self, capsys):
+        from pkgids.cli import main
+        code = main(["baseline"])
+        assert code != 0
+        assert "error" in capsys.readouterr().err.lower()
+
+    def test_baseline_push_missing_run_json_exits_nonzero(self, tmp_path, capsys):
+        from pkgids.cli import main
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        # no run.json in the directory — cmd_baseline_push returns 1
+        code = main(["baseline", "push", "pypi", "requests", "1.0.0",
+                     "--run-dir", str(run_dir)])
+        assert code != 0
+
+
+class TestCmdDiff:
+    def test_two_explicit_versions_clean_exits_zero(self, capsys):
+        from pkgids.cli import main
+        old = _fake_profile("1.0.0")
+        new = _fake_profile("1.1.0")
+        with patch("pkgids.baseline.get_profile", side_effect=[new, old]):
+            code = main(["diff", "pypi", "requests", "1.0.0", "1.1.0"])
+        assert code == 0
+        out = capsys.readouterr().out
+        result = json.loads(out)
+        assert result["verdict"] == "clean"
+
+    def test_suspicious_diff_exits_two(self, capsys):
+        from pkgids.cli import main
+        old = _fake_profile("1.0.0")
+        new = {**_fake_profile("1.1.0"), "network_domains": ["evil.com"]}
+        with patch("pkgids.baseline.get_profile", side_effect=[new, old]):
+            code = main(["diff", "pypi", "requests", "1.0.0", "1.1.0"])
+        assert code == 2
+        out = capsys.readouterr().out
+        result = json.loads(out)
+        assert result["is_suspicious"] is True
+
+    def test_one_version_auto_resolve_known_good(self, capsys):
+        from pkgids.cli import main
+        old = _fake_profile("1.0.0")
+        new = _fake_profile("1.1.0")
+        with patch("pkgids.baseline.get_profile", return_value=new), \
+             patch("pkgids.baseline.get_known_good", return_value=old):
+            code = main(["diff", "pypi", "requests", "1.1.0"])
+        assert code == 0
+
+    def test_missing_candidate_exits_nonzero(self, capsys):
+        from pkgids.cli import main
+        with patch("pkgids.baseline.get_profile", return_value=None):
+            code = main(["diff", "pypi", "requests", "1.0.0", "9.9.9"])
+        assert code != 0
+        assert "error" in capsys.readouterr().err.lower()
+
+    def test_no_auto_baseline_exits_nonzero(self, capsys):
+        from pkgids.cli import main
+        new = _fake_profile("1.1.0")
+        with patch("pkgids.baseline.get_profile", return_value=new), \
+             patch("pkgids.baseline.get_known_good", return_value=None):
+            code = main(["diff", "pypi", "requests", "1.1.0",
+                         "--baseline-mode", "previous_known_good"])
+        assert code != 0
+
+    def test_too_many_versions_exits_nonzero(self, capsys):
+        from pkgids.cli import main
+        code = main(["diff", "pypi", "requests", "1.0", "1.1", "1.2"])
+        assert code != 0
+        assert "error" in capsys.readouterr().err.lower()

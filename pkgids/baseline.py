@@ -126,22 +126,29 @@ def extract_profile(
                 pass
 
     # ── Process activity (from phase summaries) ───────────────────────────────
-    install_pa = (phases.get("install") or {}).get("process_activity") or {}
-    import_pa  = (phases.get("import")  or {}).get("process_activity") or {}
+    install_pa = (phases.get("install")          or {}).get("process_activity") or {}
+    import_pa  = (phases.get("import")           or {}).get("process_activity") or {}
+    submod_pa  = (phases.get("import_submodule") or {}).get("process_activity") or {}
 
-    subprocess_count    = (install_pa.get("process_count") or 0) + (import_pa.get("process_count") or 0)
+    subprocess_count = (
+        (install_pa.get("process_count") or 0) +
+        (import_pa.get("process_count")  or 0) +
+        (submod_pa.get("process_count")  or 0)
+    )
     suspicious_exec_count = (
-        len(install_pa.get("suspicious_execs")         or []) +
-        len(import_pa.get("suspicious_execs")          or [])
+        len(install_pa.get("suspicious_execs")        or []) +
+        len(import_pa.get("suspicious_execs")         or []) +
+        len(submod_pa.get("suspicious_execs")         or [])
     )
     sensitive_file_count = (
-        len(install_pa.get("sensitive_file_accesses")  or []) +
-        len(import_pa.get("sensitive_file_accesses")   or [])
+        len(install_pa.get("sensitive_file_accesses") or []) +
+        len(import_pa.get("sensitive_file_accesses")  or []) +
+        len(submod_pa.get("sensitive_file_accesses")  or [])
     )
 
     # Shell command count: suspicious execs whose basename is a shell
     shell_cmd_count = sum(
-        1 for pa in (install_pa, import_pa)
+        1 for pa in (install_pa, import_pa, submod_pa)
         for e in (pa.get("suspicious_execs") or [])
         if (e.get("executable") or "").rsplit("/", 1)[-1] in _SHELL_BASENAMES
     )
@@ -165,6 +172,7 @@ def extract_profile(
     any_suspicious = bool(
         install_pa.get("any_suspicious") or
         import_pa.get("any_suspicious") or
+        submod_pa.get("any_suspicious") or
         any(v is True for v in na.values())
     )
 
@@ -183,6 +191,11 @@ def extract_profile(
         "import_status":         (phases.get("import") or {}).get("status"),
         "import_exit_code":      (phases.get("import") or {}).get("exit_code"),
         "import_duration_secs":  (phases.get("import") or {}).get("duration_secs"),
+
+        # Import submodule phase (None when absent — backward compat with pre-v1.6 artifacts)
+        "import_submodule_status":        (phases.get("import_submodule") or {}).get("status"),
+        "import_submodule_exit_code":     (phases.get("import_submodule") or {}).get("exit_code"),
+        "import_submodule_duration_secs": (phases.get("import_submodule") or {}).get("duration_secs"),
 
         # Network features
         "network_domains": sorted(domains),

@@ -178,6 +178,16 @@ def _diff_phase_status(old: dict, new: dict) -> list[Finding]:
                 f"{phase} phase status regressed: {old_s!r} → {new_s!r}",
                 old=old_s, new=new_s,
             ))
+    # import_submodule: only flag regression when the key is present in both profiles.
+    # Absent in old = first run with import_submodule trigger, not a regression.
+    old_sub = old.get("import_submodule_status")
+    new_sub = new.get("import_submodule_status")
+    if old_sub == "ok" and new_sub is not None and new_sub != "ok":
+        findings.append(_finding(
+            "import_submodule_status_regression", "medium",
+            f"import_submodule phase status regressed: {old_sub!r} → {new_sub!r}",
+            old=old_sub, new=new_sub,
+        ))
     return findings
 
 

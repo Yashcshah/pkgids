@@ -661,6 +661,50 @@ class TestBuildHtmlReport:
         assert "differ" not in build_html_report(self._rep(diff=None)).lower() or \
                "How does this differ" not in build_html_report(self._rep(diff=None))
 
+    def test_diff_section_renders_findings_table(self):
+        diff = {
+            "from_version": "1.0.0", "to_version": "1.0.1",
+            "risk_delta": "high", "new_domains": [], "new_ports": [],
+            "findings": [
+                {"kind": "became_suspicious", "severity": "critical",
+                 "message": "Package went from clean to suspicious", "detail": {}},
+                {"kind": "new_network_ports", "severity": "medium",
+                 "message": "New ports used: [4444]", "detail": {"added": [4444]}},
+            ],
+        }
+        html = build_html_report(self._rep(diff=diff))
+        assert "became_suspicious" in html
+        assert "sev-critical" in html
+        assert "new_network_ports" in html
+        assert "sev-medium" in html
+        assert "Package went from clean to suspicious" in html
+
+    def test_diff_section_no_findings_table_when_findings_empty(self):
+        diff = {
+            "from_version": "1.0.0", "to_version": "1.0.1",
+            "risk_delta": "clean", "new_domains": [], "new_ports": [],
+            "findings": [],
+        }
+        html = build_html_report(self._rep(diff=diff))
+        # CSS class exists in stylesheet; check that no table element is rendered
+        assert '<table class="diff-findings-table">' not in html
+
+    def test_diff_section_caps_at_ten_findings(self):
+        findings = [
+            {"kind": f"finding_{i}", "severity": "low",
+             "message": f"msg {i}", "detail": {}}
+            for i in range(15)
+        ]
+        diff = {
+            "from_version": "1.0.0", "to_version": "1.0.1",
+            "risk_delta": "low", "new_domains": [], "new_ports": [],
+            "findings": findings,
+        }
+        html = build_html_report(self._rep(diff=diff))
+        assert "finding_9" in html          # 10th item rendered
+        assert "finding_10" not in html     # 11th item suppressed
+        assert "more finding" in html       # overflow note shown
+
     # ── process tree ──────────────────────────────────────────────────────────
 
     def test_process_tree_shows_suspicious_execs(self):
