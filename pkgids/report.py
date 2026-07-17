@@ -76,6 +76,8 @@ def normalize(
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
+    bait_planted: dict = (run_data.get("sandbox_meta") or {}).get("bait_planted") or {}
+
     # ── metadata.json ─────────────────────────────────────────────────────────
     # Primary location: run_dir/metadata.json (written there for some workflows).
     # Fallback: artifact dir derived from run.json's "artifact" field (the
@@ -166,7 +168,8 @@ def normalize(
             "sensitive_file_events": len(sens_ev),
             "socket_events":         len(socket_ev),
         },
-        "correlations": correlations,
+        "correlations":  correlations,
+        "bait_planted":  bait_planted,
         "diff": diff,
     }
 
@@ -520,6 +523,7 @@ def build_report(normalized: dict) -> dict:
         "event_counts":  normalized.get("event_counts", {}),
         "metadata":      normalized.get("metadata", {}),
         "diff":          normalized.get("diff"),
+        "bait_planted":  normalized.get("bait_planted", {}),
         # internal keys for HTML renderer (not written to JSON output)
         "_run":           run,
         "_phases_detail": normalized.get("phases", {}),
@@ -610,7 +614,7 @@ def _build_trigger_breakdown_section(
             f'</tr>\n'
         )
     return f"""
-  <section class="section">
+  <section class="section" id="trigger-breakdown">
     <header><h2>Trigger breakdown</h2><span class="q">multi-trigger comparison</span></header>
     <div class="body">
       <table>
@@ -621,6 +625,72 @@ def _build_trigger_breakdown_section(
         </tr></thead>
         <tbody>{rows}</tbody>
       </table>
+    </div>
+  </section>"""
+
+
+def _build_bait_section(
+    bait_planted: dict,
+    indicators: list[dict],
+    e,  # html.escape
+) -> str:
+    """Render the Synthetic Bait Access HTML section."""
+    planted_files: list[dict] = bait_planted.get("files") or []
+    planted_paths: set[str]   = set(bait_planted.get("planted_paths") or [])
+
+    bait_ind = next(
+        (i for i in indicators if i.get("id", "").startswith("bait_")),
+        None,
+    )
+    accessed_paths: set[str] = set(
+        (bait_ind or {}).get("evidence", {}).get("accessed_paths") or []
+    )
+
+    planted_count  = len(planted_files) or len(planted_paths)
+    accessed_count = len(accessed_paths)
+
+    if not planted_paths:
+        body = (
+            '<p class="dim">No bait manifest recorded'
+            " — run predates Phase 4 or bait was disabled.</p>"
+        )
+    else:
+        rows = ""
+        for f in planted_files:
+            path = f.get("path", "")
+            cat  = f.get("category", "")
+            hit  = path in accessed_paths
+            hit_td = (
+                '<td style="color:var(--crit);font-weight:600">yes</td>'
+                if hit else "<td>no</td>"
+            )
+            rows += (
+                f"<tr><td><code>{e(path)}</code></td>"
+                f'<td class="dim">{e(cat)}</td>'
+                f"{hit_td}</tr>\n"
+            )
+        tier_html = ""
+        if bait_ind:
+            tier_html = (
+                f'<p style="margin-top:12px"><b>Detection tier:</b> '
+                f'{e(bait_ind["id"].replace("_"," "))} '
+                f"({accessed_count} / {planted_count} files accessed)</p>"
+            )
+        body = f"""
+      <p class="lead">{planted_count} synthetic credential file(s) planted.
+      Accessed: {accessed_count} / {planted_count}.</p>
+      <table>
+        <thead><tr><th>Bait file</th><th>Category</th><th>Accessed?</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+      {tier_html}"""
+
+    data_empty_attr = ' data-empty="true"' if not accessed_paths else ""
+    return f"""
+  <section class="section" id="bait-access"{data_empty_attr}>
+    <header><h2>Synthetic bait access</h2><span class="q">credential honeypot detection</span></header>
+    <div class="body">
+      {body}
     </div>
   </section>"""
 
@@ -666,6 +736,7 @@ def build_html_report(  # noqa: C901
     narrative       = report_dict.get("narrative", [])
     breakdown       = report_dict.get("score_breakdown", {})
 
+    bait_planted     = report_dict.get("bait_planted") or {}
     phases_detail    = report_dict.get("_phases_detail", {})
     network          = report_dict.get("_network", {})
     telemetry        = report_dict.get("_telemetry", {})
@@ -740,7 +811,7 @@ def build_html_report(  # noqa: C901
     ) if adv_id_cells else ""
 
     advisory_section = f"""
-  <section class="section">
+  <section class="section" id="verdict-breakdown">
     <header><h2>Verdict breakdown</h2><span class="q">three-layer analysis</span></header>
     <div class="body">
       <div class="layers">
@@ -934,7 +1005,8 @@ def build_html_report(  # noqa: C901
                 f'<td>TLS/SNI</td>'
                 f'<td class="muted">{e(proc)}</td></tr>\n'
             )
-    if not domain_rows:
+    _network_empty = not domain_rows
+    if _network_empty:
         domain_rows = '<tr><td colspan="3" class="muted">No outbound connections recorded</td></tr>'
 
     # ── 7. Sensitive files (+ exfil flag) ─────────────────────────────────────
@@ -963,7 +1035,8 @@ def build_html_report(  # noqa: C901
             f'<td>{e(str(mode))}</td>'
             f'<td>{exfil_tag}</td></tr>\n'
         )
-    if not sens_rows:
+    _sensitive_empty = not sens_rows
+    if _sensitive_empty:
         sens_rows = '<tr><td colspan="3" class="muted">No sensitive files accessed</td></tr>'
 
     # ── 8. Behavior delta ─────────────────────────────────────────────────────
@@ -1077,6 +1150,8 @@ def build_html_report(  # noqa: C901
     threat_cls  = _THREAT_CLASS.get(verdict_str, "likely")
     active_zone = _meter_zone(score_val)
     run_id      = run_detail.get("run_dir", "").rsplit("/", 1)[-1] or "—"
+    _network_empty_attr   = ' data-empty="true"' if _network_empty   else ''
+    _sensitive_empty_attr = ' data-empty="true"' if _sensitive_empty else ''
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1238,7 +1313,9 @@ td:last-child,th:last-child{{padding-right:2px}}
 code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(--tint);
   border:1px solid var(--line);padding:1px 6px;border-radius:5px;color:var(--ink-2);word-break:break-all}}
 .ev{{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);
-  max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  white-space:pre-wrap;word-break:break-word;line-height:1.5}}
+table.indicators-table{{table-layout:fixed}}
+table.indicators-table th:last-child,table.indicators-table td:last-child{{width:34%}}
 /* ATT&CK */
 .tactic-row{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}}
 .tactic{{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;
@@ -1296,6 +1373,37 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
 .report-footer{{display:flex;justify-content:space-between;align-items:center;gap:16px;
   margin-top:26px;padding-top:16px;border-top:1px solid var(--line);
   font-size:11.5px;color:var(--muted);font-family:"IBM Plex Mono",monospace;flex-wrap:wrap}}
+.report-footer a{{color:var(--ink-2);text-decoration:none;border-bottom:1px solid var(--line)}}
+.report-footer a:hover{{color:var(--threat);border-color:var(--threat)}}
+/* mini nav */
+.mini-nav{{position:sticky;top:0;z-index:10;display:flex;gap:2px;overflow-x:auto;
+  background:var(--paper);border-bottom:1px solid var(--line);padding:9px 0;margin-bottom:2px}}
+.mini-nav a{{flex:none;font-size:11.5px;font-family:"IBM Plex Mono",monospace;color:var(--muted);
+  text-decoration:none;padding:5px 11px;border-radius:6px;white-space:nowrap}}
+.mini-nav a:hover{{color:var(--ink);background:var(--tint)}}
+section[id]{{scroll-margin-top:52px}}
+/* copy button */
+.copy-btn{{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;
+  flex:none;border:1px solid var(--line);border-radius:5px;background:var(--card);color:var(--muted);
+  cursor:pointer;padding:0;margin-left:6px;vertical-align:middle}}
+.copy-btn:hover{{color:var(--ink);border-color:var(--faint)}}
+.copy-btn svg{{width:11px;height:11px}}
+.copy-btn.copied{{color:var(--ok);border-color:var(--ok)}}
+.ev-wrap{{display:flex;align-items:flex-start;gap:4px}}
+.run-meta .copy-btn{{background:transparent}}
+/* collapsible empty sections */
+.section[data-empty="true"] .body{{display:none}}
+.section[data-empty="true"] header{{cursor:pointer}}
+.section[data-empty="true"] header::after{{content:"show \2193";margin-left:8px;font-size:10.5px;
+  font-family:"IBM Plex Mono",monospace;color:var(--faint);letter-spacing:.04em}}
+.section[data-empty="true"][data-open="true"] .body{{display:block}}
+.section[data-empty="true"][data-open="true"] header::after{{content:"hide \2191"}}
+/* table row hover */
+tbody tr:hover td{{background:var(--tint)}}
+.total-row:hover td,.combo-row:hover td{{background:inherit}}
+@media print{{.mini-nav{{display:none}}.copy-btn{{display:none}}
+  .section[data-empty="true"] .body{{display:block !important}}
+  .section[data-empty="true"] header::after{{display:none}}}}
 @media(max-width:820px){{
   .hero{{grid-template-columns:1fr}}
   .hero-score{{border-left:none;border-top:1px solid var(--line)}}
@@ -1304,7 +1412,8 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
   .facts{{grid-template-columns:repeat(2,1fr)}}
   .arts{{grid-template-columns:1fr}}
 }}
-@page{{size:A4;margin:14mm}}
+@page{{size:A4;margin:14mm 14mm 20mm}}
+@page{{@bottom-center{{content:counter(page) " / " counter(pages);font-family:"IBM Plex Mono",monospace;font-size:9px;color:#8a929c}}}}
 @media print{{
   body{{background:#fff;font-size:11px}}
   .sheet{{max-width:none;padding:0}}
@@ -1315,7 +1424,7 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
 <body data-threat="{threat_cls}">
 <div class="sheet">
 
-<header class="masthead">
+<header class="masthead" id="top">
   <div class="brand">
     <div class="glyph">&#9670;</div>
     <div>
@@ -1324,10 +1433,25 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </div>
   <div class="run-meta">
-    <div>run <b>{e(run_id)}</b></div>
+    <div>run <b id="run-id-text">{e(run_id)}</b><button class="copy-btn" data-copy-target="run-id-text" title="Copy run ID" aria-label="Copy run ID"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M3 11V3a1 1 0 0 1 1-1h8"/></svg></button></div>
     <div>engine v0.1.0 &middot; sandbox trace</div>
   </div>
 </header>
+
+<nav class="mini-nav">
+  <a href="#verdict-breakdown">Verdict</a>
+  <a href="#score-breakdown">Score</a>
+  <a href="#attack-mapping">ATT&amp;CK</a>
+  <a href="#indicators">Indicators</a>
+  <a href="#process-tree">Process tree</a>
+  <a href="#network-activity">Network</a>
+  <a href="#sensitive-files">Sensitive files</a>
+  <a href="#bait-access">Bait</a>
+  <a href="#trigger-breakdown">Triggers</a>
+  <a href="#phase-summary">Phases</a>
+  <a href="#event-counts">Event counts</a>
+  <a href="#raw-artifacts">Artifacts</a>
+</nav>
 
 <section class="hero">
   <div class="hero-main">
@@ -1383,7 +1507,7 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
 
 {advisory_section}
 
-  <section class="section">
+  <section class="section" id="score-breakdown">
     <header><h2>Score breakdown</h2><span class="q">why this verdict</span></header>
     <div class="body">
       <table>
@@ -1395,7 +1519,7 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="attack-mapping">
     <header><h2>ATT&amp;CK mapping</h2><span class="q">tactics &amp; techniques</span></header>
     <div class="body">
       <div class="tactic-row">{tactic_chips}</div>
@@ -1403,10 +1527,10 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="indicators">
     <header><h2>Indicators</h2><span class="q">detailed findings</span></header>
     <div class="body">
-      <table>
+      <table class="indicators-table">
         <thead><tr>
           <th>Sev</th><th>Indicator</th><th>Technique</th>
           <th>Tactic</th><th>Phase</th><th>Evidence</th>
@@ -1416,14 +1540,14 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="process-tree">
     <header><h2>Process tree</h2><span class="q">by phase</span></header>
     <div class="body">
       {proc_html if proc_html else '<span class="dim">No phase data</span>'}
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="network-activity"{_network_empty_attr}>
     <header><h2>Network activity</h2><span class="q">hosts &amp; domains contacted</span></header>
     <div class="body">
       <table>
@@ -1435,7 +1559,7 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="sensitive-files"{_sensitive_empty_attr}>
     <header><h2>Sensitive file access</h2><span class="q">files &amp; secrets touched</span></header>
     <div class="body">
       <table>
@@ -1444,10 +1568,11 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
       </table>
     </div>
   </section>
+  {_build_bait_section(bait_planted, indicators, e)}
   {diff_section}
   {_build_trigger_breakdown_section(trigger_verdicts, e, _VERDICT_COLOR)}
 
-  <section class="section">
+  <section class="section" id="phase-summary">
     <header><h2>Phase summary</h2><span class="q">execution lifecycle</span></header>
     <div class="body">
       <table>
@@ -1461,14 +1586,14 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="event-counts">
     <header><h2>Event counts</h2><span class="q">raw telemetry volume</span></header>
     <div class="body">
       <div class="stat-grid">{stat_cells}</div>
     </div>
   </section>
 
-  <section class="section">
+  <section class="section" id="raw-artifacts">
     <header><h2>Raw artifacts</h2><span class="q">run {e(run_id)}</span></header>
     <div class="body">
       {f'<ul class="arts">{artifact_links}</ul>'
@@ -1479,10 +1604,46 @@ code,.code{{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(
   <footer class="report-footer">
     <span>pkgids &middot; package install &amp; behavior analysis</span>
     <span>generated {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</span>
+    <a href="#top">&uarr; back to top</a>
   </footer>
 
 </main>
 </div>
+<script>
+document.querySelectorAll('.section[data-empty="true"] > header').forEach(function(h){{
+  h.addEventListener('click', function(){{
+    var sec = h.closest('.section');
+    sec.setAttribute('data-open', sec.getAttribute('data-open') === 'true' ? 'false' : 'true');
+  }});
+}});
+document.querySelectorAll('.ev').forEach(function(cell){{
+  var text = cell.textContent;
+  var wrap = document.createElement('span');
+  wrap.className = 'ev-wrap';
+  var span = document.createElement('span');
+  span.textContent = text;
+  var btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.title = 'Copy evidence';
+  btn.setAttribute('aria-label','Copy evidence');
+  btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M3 11V3a1 1 0 0 1 1-1h8"/></svg>';
+  btn.addEventListener('click', function(){{ copyText(text, btn); }});
+  wrap.appendChild(span); wrap.appendChild(btn);
+  cell.innerHTML = ''; cell.appendChild(wrap);
+}});
+document.querySelectorAll('.copy-btn[data-copy-target]').forEach(function(btn){{
+  btn.addEventListener('click', function(){{
+    var el = document.getElementById(btn.getAttribute('data-copy-target'));
+    copyText(el.textContent, btn);
+  }});
+}});
+function copyText(text, btn){{
+  navigator.clipboard.writeText(text).then(function(){{
+    btn.classList.add('copied');
+    setTimeout(function(){{ btn.classList.remove('copied'); }}, 1200);
+  }});
+}}
+</script>
 </body>
 </html>"""
 

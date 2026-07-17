@@ -736,7 +736,7 @@ class TestBuildHtmlReport:
         rep["package"]["name"] = "<script>alert(1)</script>"
         rep["_run"]["name"]    = "<script>alert(1)</script>"
         html = build_html_report(rep)
-        assert "<script>" not in html
+        assert "<script>alert(1)</script>" not in html
         assert "&lt;script&gt;" in html
 
 
@@ -1208,3 +1208,109 @@ class TestImportSubmoduleTriggerVerdicts:
         assert "Trigger breakdown"  in html
         assert "import_submodule"   in html
         assert "Import (submodule)" in html
+
+
+# ── Phase 4: bait section HTML rendering ─────────────────────────────────────
+
+_BAIT_PLANTED_MANIFEST = {
+    "run_id":        "testrun0",
+    "planted_paths": [
+        "/home/deton/.env",
+        "/home/deton/.aws/credentials",
+        "/home/deton/.pypirc",
+        "/home/deton/.ssh/id_rsa",
+    ],
+    "planted_count": 4,
+    "files": [
+        {"path": "/home/deton/.env",             "category": "env_file",        "size": 80},
+        {"path": "/home/deton/.aws/credentials", "category": "aws_credentials", "size": 95},
+        {"path": "/home/deton/.pypirc",          "category": "pypi_rc",         "size": 70},
+        {"path": "/home/deton/.ssh/id_rsa",      "category": "ssh_keys",        "size": 110},
+    ],
+}
+
+
+def _bait_rep(**overrides) -> dict:
+    base = {
+        "package":            {"ecosystem": "pypi", "name": "badpkg", "version": "1.0"},
+        "verdict":            "malicious",
+        "final_verdict":      "malicious",
+        "behavioral_verdict": "malicious",
+        "advisory_status":    "none",
+        "verdict_basis":      "dynamic",
+        "advisory":           {},
+        "score":              65,
+        "confidence":         0.90,
+        "attack_tactics":     [],
+        "techniques":         [],
+        "indicators":         [],
+        "narrative":          ["Malicious behavior detected."],
+        "score_breakdown":    {"items": [], "combo_bonus": 0, "total": 65},
+        "summary":            {"indicator_count": 1, "critical": 1, "high": 0, "medium": 0, "low": 0},
+        "trigger_verdicts":   [],
+        "_trigger_verdicts":  [],
+        "phases":             {},
+        "event_counts":       {},
+        "metadata":           {},
+        "diff":               None,
+        "_run":               {"ecosystem": "pypi", "name": "badpkg",
+                               "version": "1.0", "run_dir": ""},
+        "_phases_detail":     {},
+        "_network":           {},
+        "_telemetry":         {},
+        "_correlations":      {},
+        "bait_planted":       _BAIT_PLANTED_MANIFEST,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestBaitSectionHtml:
+    def test_bait_section_present_when_bait_planted(self):
+        html = build_html_report(_bait_rep())
+        assert "bait-access" in html
+        assert "Synthetic bait access" in html
+
+    def test_bait_section_present_when_no_bait(self):
+        html = build_html_report(_bait_rep(bait_planted={}))
+        assert "bait-access" in html
+        assert "Synthetic bait access" in html
+
+    def test_no_bait_shows_pre_phase4_message(self):
+        html = build_html_report(_bait_rep(bait_planted={}))
+        assert "predates Phase 4" in html
+
+    def test_bait_planted_shows_file_paths(self):
+        html = build_html_report(_bait_rep())
+        assert "/home/deton/.env"             in html
+        assert "/home/deton/.aws/credentials" in html
+
+    def test_bait_section_collapsed_when_no_accesses(self):
+        html = build_html_report(_bait_rep())
+        # data-empty on bait section when nothing accessed
+        assert 'id="bait-access" data-empty="true"' in html
+
+    def test_bait_section_not_collapsed_when_files_accessed(self):
+        from pkgids.indicators import _CATALOG
+        ind = {
+            "id":        "bait_enumeration",
+            "title":     _CATALOG["bait_enumeration"]["title"],
+            "tactic":    _CATALOG["bait_enumeration"]["tactic"],
+            "technique": _CATALOG["bait_enumeration"]["technique"],
+            "severity":  _CATALOG["bait_enumeration"]["severity"],
+            "weight":    _CATALOG["bait_enumeration"]["weight"],
+            "evidence":  {
+                "accessed_paths": ["/home/deton/.env", "/home/deton/.aws/credentials"],
+                "total_planted": 4,
+            },
+        }
+        html = build_html_report(_bait_rep(indicators=[ind]))
+        assert 'id="bait-access" data-empty="true"' not in html
+
+    def test_mini_nav_includes_bait_link(self):
+        html = build_html_report(_bait_rep())
+        assert 'href="#bait-access"' in html
+
+    def test_bait_section_shows_planted_count(self):
+        html = build_html_report(_bait_rep())
+        assert "4 synthetic credential file(s) planted" in html

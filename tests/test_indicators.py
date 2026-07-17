@@ -395,6 +395,99 @@ class TestExtractUnusualPort:
         assert "exfiltration_unusual_port" not in _ids(extract_indicators(norm))
 
 
+# ── bait access ──────────────────────────────────────────────────────────────
+
+_PLANTED_PATHS = [
+    "/home/deton/.env",
+    "/home/deton/.aws/credentials",
+    "/home/deton/.pypirc",
+    "/home/deton/.ssh/id_rsa",
+]
+
+
+def _norm_bait(accessed: list[str], planted: list[str] | None = None) -> dict:
+    planted_paths = planted if planted is not None else _PLANTED_PATHS
+    base = _norm(
+        sensitive_file_events=[
+            {"path": p, "sensitive": True} for p in accessed
+        ]
+    )
+    base["bait_planted"] = {
+        "planted_paths": planted_paths,
+        "planted_count": len(planted_paths),
+        "files": [{"path": p, "category": "test"} for p in planted_paths],
+    }
+    return base
+
+
+class TestExtractBaitAccess:
+    def test_no_bait_planted_no_indicator(self):
+        norm = _norm(sensitive_file_events=[{"path": "/home/deton/.env", "sensitive": True}])
+        assert not any(i["id"].startswith("bait_") for i in extract_indicators(norm))
+
+    def test_empty_planted_paths_no_indicator(self):
+        norm = _norm_bait(accessed=["/home/deton/.env"], planted=[])
+        assert not any(i["id"].startswith("bait_") for i in extract_indicators(norm))
+
+    def test_no_bait_files_accessed_no_indicator(self):
+        norm = _norm_bait(accessed=[])
+        assert not any(i["id"].startswith("bait_") for i in extract_indicators(norm))
+
+    def test_one_file_accessed_is_bait_probe(self):
+        norm = _norm_bait(accessed=["/home/deton/.env"])
+        assert "bait_probe" in _ids(extract_indicators(norm))
+
+    def test_two_files_accessed_is_bait_enumeration(self):
+        norm = _norm_bait(accessed=["/home/deton/.env", "/home/deton/.aws/credentials"])
+        assert "bait_enumeration" in _ids(extract_indicators(norm))
+
+    def test_three_files_accessed_is_bait_enumeration(self):
+        norm = _norm_bait(accessed=[
+            "/home/deton/.env",
+            "/home/deton/.aws/credentials",
+            "/home/deton/.pypirc",
+        ])
+        assert "bait_enumeration" in _ids(extract_indicators(norm))
+
+    def test_four_files_accessed_is_bait_credential_harvest(self):
+        norm = _norm_bait(accessed=_PLANTED_PATHS)
+        assert "bait_credential_harvest" in _ids(extract_indicators(norm))
+
+    def test_exactly_one_bait_indicator_fires(self):
+        norm = _norm_bait(accessed=_PLANTED_PATHS)
+        bait_ids = [i["id"] for i in extract_indicators(norm) if i["id"].startswith("bait_")]
+        assert len(bait_ids) == 1
+
+    def test_non_bait_sensitive_file_does_not_trigger(self):
+        norm = _norm_bait(accessed=["/home/deton/.bashrc"])
+        assert not any(i["id"].startswith("bait_") for i in extract_indicators(norm))
+
+    def test_evidence_contains_accessed_paths(self):
+        norm = _norm_bait(accessed=["/home/deton/.env"])
+        ind  = next(i for i in extract_indicators(norm) if i["id"] == "bait_probe")
+        assert "/home/deton/.env" in ind["evidence"]["accessed_paths"]
+
+    def test_evidence_contains_total_planted(self):
+        norm = _norm_bait(accessed=["/home/deton/.env"])
+        ind  = next(i for i in extract_indicators(norm) if i["id"] == "bait_probe")
+        assert ind["evidence"]["total_planted"] == len(_PLANTED_PATHS)
+
+    def test_bait_probe_is_medium_severity(self):
+        norm = _norm_bait(accessed=["/home/deton/.env"])
+        ind  = next(i for i in extract_indicators(norm) if i["id"] == "bait_probe")
+        assert ind["severity"] == "medium"
+
+    def test_bait_enumeration_is_high_severity(self):
+        norm = _norm_bait(accessed=["/home/deton/.env", "/home/deton/.aws/credentials"])
+        ind  = next(i for i in extract_indicators(norm) if i["id"] == "bait_enumeration")
+        assert ind["severity"] == "high"
+
+    def test_bait_credential_harvest_is_critical(self):
+        norm = _norm_bait(accessed=_PLANTED_PATHS)
+        ind  = next(i for i in extract_indicators(norm) if i["id"] == "bait_credential_harvest")
+        assert ind["severity"] == "critical"
+
+
 # ── clean run ─────────────────────────────────────────────────────────────────
 
 class TestCleanRun:

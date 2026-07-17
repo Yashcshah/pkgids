@@ -111,19 +111,49 @@ See [architecture.md](architecture.md) for the full system diagram.
 
 ---
 
+## Fake Secret Baiting (Phase 4)
+
+pkgids plants four synthetic credential files in the sandbox container before any trigger runs. If the detonated package reads any of these files, the access is detected through the existing strace sensitive-file telemetry pipeline and mapped to a graduated bait indicator.
+
+### Planted files
+
+| Container path | Category | Sample content marker |
+|---|---|---|
+| `/home/deton/.env` | env_file | `PKGIDSBAIT_<RUN>_SECRET=PKGIDSBAIT_FAKE_ENV_CRED_BAIT` |
+| `/home/deton/.aws/credentials` | aws_credentials | `aws_access_key_id=PKGIDSBAIT<RUN>FAKEKEY` |
+| `/home/deton/.pypirc` | pypi_rc | `password = PKGIDSBAIT<RUN>FAKEPYPITOKEN` |
+| `/home/deton/.ssh/id_rsa` | ssh_keys | fake PEM block tagged `PKGIDSBAIT<RUN>THISISASYNTHETICBAITCREDENTIAL` |
+
+All content contains the literal strings `PKGIDSBAIT` and `BAIT`. Every run tags its bait with the first 8 characters of the run ID (uppercased), making bait content unique per run and safe to log or archive.
+
+### Detection tiers
+
+| Files accessed | Indicator | Severity | Score added |
+|---|---|---|---|
+| 1 | `bait_probe` | medium | +15 |
+| 2–3 | `bait_enumeration` | high | +25 |
+| 4 | `bait_credential_harvest` | critical | +40 |
+
+Bait planting happens after the sandbox container starts but before the trigger loop, so it is transparent to strace and does not pollute per-trigger telemetry. Bait file accesses also fire the standard `sensitive_file_accessed`, `env_file_read`, and `ssh_key_accessed` indicators independently — the bait tier is additive, not exclusive.
+
+The HTML report includes a collapsible **Synthetic bait access** section listing each planted file, whether it was accessed, and the detection tier reached.
+
+---
+
 ## Components
 
 | File | Role |
 |---|---|
 | pkgids/fetch.py | Downloads PyPI (prefers sdist, falls back to wheel) and npm (tarball) artifacts. Verifies SHA-256 (PyPI) or SRI sha512- hash (npm). Writes metadata.json with upload timestamp, maintainers, archive member list, and install-hook detection. Never executes anything. |
 | pkgids/sandbox.py | Wraps docker run --runtime runsc. Manages the resolv.conf temp file (gVisor DNS fix), per-run unique container names, IP polling after startup to get the detonet IP before the container exits and Docker clears NetworkSettings, resource limits, and guaranteed cleanup via finally. |
-| pkgids/capture.py | Pipeline orchestrator. Fetches or uses a local artifact, starts tcpdump, runs install and import phases, collects timestamp-windowed appliance logs, and writes install.json, import.json, network.jsonl, and run.json. |
+| pkgids/capture.py | Pipeline orchestrator. Fetches or uses a local artifact, starts tcpdump, plants synthetic credential bait files in the sandbox (Phase 4), runs install and import phases, collects timestamp-windowed appliance logs, and writes install.json, import.json, network.jsonl, and run.json. |
 | pkgids/validate.py | Reads a labeled CSV, runs capture.run() for each sample (skipping already-completed rows for resumability), computes TP/FP/TN/FN and detection and FP rates. Supports --local-artifacts for corpus validation from local sdists. |
 | pkgids/dataset.py | Fetches malicious-package records from the OpenSSF malicious-packages repository via the GitHub Contents API. Returns ecosystem, name, version, osv_id, summary dicts. Results are cached to data/malicious_<ecosystem>.json. |
 | pkgids/analyze.py | Cross-stream correlation engine. Detects file-before-exfil, shell-before-network, and subprocess payload patterns across strace telemetry and network logs. Writes correlations.json to the run directory. |
+| pkgids/bait.py | Plants four synthetic credential files (.env, .aws/credentials, .pypirc, .ssh/id_rsa) in the sandbox before detonation (Phase 4). All content is marked PKGIDSBAIT and is provably fake; each file is tagged with a per-run ID. Accesses are cross-referenced against telemetry to fire bait_probe, bait_enumeration, or bait_credential_harvest indicators. |
 | pkgids/advisory.py | Best-effort OSV.dev advisory lookup. Returns a normalized 6-field summary (advisory_hit, advisory_source, advisory_count, advisory_ids, advisory_summaries, advisory_error). Never raises; errors are captured in advisory_error. |
-| pkgids/score.py | Additive 0–100 scoring model. 16 weighted indicators; +25 exfiltration combo bonus when credential access and HTTP/TLS both appear. Five-tier behavioral verdict: no_malicious_behavior_observed / low_risk / suspicious / likely_malicious / malicious. |
-| pkgids/report.py | Six-question HTML + JSON report: what happened, why the verdict, which phase, which host, which file, and how it differs from baseline. Separates dynamic behavioral verdict, advisory intelligence, and final analyst-facing verdict. Writes behavior_profile.json and diff.json to the run directory alongside the report. |
+| pkgids/score.py | Additive 0–100 scoring model. 19 weighted indicators across network, credential-access, process, and bait-detection tiers; +25 exfiltration combo bonus when credential access and HTTP/TLS both appear. Five-tier behavioral verdict: no_malicious_behavior_observed / low_risk / suspicious / likely_malicious / malicious. |
+| pkgids/report.py | HTML + JSON report covering behavioral verdict, advisory intelligence, sensitive-file accesses, synthetic bait access (Phase 4), and baseline diff. Separates dynamic behavioral verdict, advisory intelligence, and final analyst-facing verdict. Writes behavior_profile.json and diff.json to the run directory alongside the report. |
 | infra/fakeinternet/responder.py | Pure-stdlib Python. DNS server (UDP 53) that resolves every hostname to itself. TCP listeners on ports 21, 25, 80, 443, 8080. Extracts HTTP Host header and request line, TLS SNI, SMTP/FTP banners. Writes JSONL to /logs/<src_ip>.jsonl. |
 
 ---
@@ -443,13 +473,15 @@ Advisory intelligence can only escalate, never lower, the final verdict.
 
 **Supported ecosystems.** Deep support exists for PyPI (sdist/wheel preference, SHA-256 integrity, metadata.json) and npm. Other ecosystems such as RubyGems, crates.io, and Maven are not supported.
 
-**Simple prediction rule.** The current heuristic is: network_activity=True means malicious, install timeout means malicious, otherwise benign. The additive scoring model in score.py refines this into four tiers, but the primary detection signal is still behavioral (network + process activity). No Zeek-based protocol analysis or static feature extraction beyond the archive member list.
+**Detection model.** The primary detection signal is behavioral: network activity, sensitive-file access, process execution, and (with Phase 4) synthetic bait credential access. score.py implements an additive 0–100 model with 19 weighted indicators across network, credential-access, process, and bait-detection tiers. No Zeek-based protocol analysis or static feature extraction beyond the archive member list.
 
 **No live feed.** The tool is driven by explicit pkgids detonate or pkgids validate calls. Integration with a real-time package-publication feed such as PyPI RSS or BigQuery events is not implemented.
 
 **tcpdump requires host root.** The pcap capture uses tcpdump on the host bridge interface. This is skipped with a warning if the host user lacks the necessary capability. The JSONL appliance log is always written regardless.
 
 **gVisor must be installed.** The sandbox requires --runtime runsc. On machines without gVisor, set runtime = "runc" in config.toml. This removes kernel-level isolation but preserves all other containment layers.
+
+**Fake Secret Baiting v1 scope.** The bait module is limited to file-read detection. v1 does not inject bait tokens into environment variables at process start, does not match bait content in captured network payloads (so exfiltration of a bait credential is not confirmed at the payload level), and does not add a dedicated detonation trigger. A package that reads a bait file and exfiltrates its contents will accumulate the bait indicator and any network indicators independently, but payload-level correlation is deferred to a future version.
 
 ---
 
@@ -469,4 +501,4 @@ The corpus samples are safety-research packages. They target a non-existent doma
 pytest -v
 ```
 
-641 unit tests pass without Docker. 17 Docker-dependent tests are automatically skipped when the environment is not configured.
+939 unit tests pass without Docker. 17 Docker-dependent tests are automatically skipped when the environment is not configured.

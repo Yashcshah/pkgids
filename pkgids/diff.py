@@ -277,6 +277,19 @@ def _diff_obfuscation_patterns(old: dict, new: dict) -> list[Finding]:
     return []
 
 
+def _diff_bait_access(old: dict, new: dict) -> list[Finding]:
+    """Flag when a version newly accesses synthetic bait credential files."""
+    old_n = int(old.get("bait_files_accessed", 0))
+    new_n = int(new.get("bait_files_accessed", 0))
+    if new_n > 0 and new_n > old_n:
+        return [_finding(
+            "bait_file_access_appeared", "critical",
+            f"Package now accesses synthetic bait credential files: {new_n} file(s)",
+            old=old_n, new=new_n,
+        )]
+    return []
+
+
 def _diff_event_volume(old: dict, new: dict) -> list[Finding]:
     """Flag >100% volume increase in subprocess or file-create event counts."""
     findings: list[Finding] = []
@@ -331,6 +344,7 @@ _CHECKS = [
     _diff_install_hooks,
     _diff_obfuscation_patterns,
     _diff_event_volume,
+    _diff_bait_access,
 ]
 
 _RISK_DELTA: dict[int, str] = {4: "critical", 3: "high", 2: "medium", 1: "low", 0: "clean"}

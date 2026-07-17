@@ -43,6 +43,10 @@ _WEIGHTS: dict[str, int] = {
     "install_timed_out":             10,
     "install_hook_executed":         10,
     "file_system_discovery":         10,
+    # bait confirmation (Phase 4)
+    "bait_probe":                    15,
+    "bait_enumeration":              25,
+    "bait_credential_harvest":       40,
 }
 
 # Indicator IDs that represent credential / secret-file access

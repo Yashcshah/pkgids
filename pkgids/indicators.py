@@ -139,6 +139,27 @@ _CATALOG: dict[str, dict] = {
         "severity":  "medium",
         "weight":    0.25,
     },
+    "bait_probe": {
+        "title":     "Synthetic bait file opened (probe)",
+        "tactic":    "credential-access",
+        "technique": "T1552.001",
+        "severity":  "medium",
+        "weight":    0.50,
+    },
+    "bait_enumeration": {
+        "title":     "Synthetic bait credential files enumerated",
+        "tactic":    "credential-access",
+        "technique": "T1552.001",
+        "severity":  "high",
+        "weight":    0.75,
+    },
+    "bait_credential_harvest": {
+        "title":     "Synthetic bait credentials harvested (all files accessed)",
+        "tactic":    "credential-access",
+        "technique": "T1552.001",
+        "severity":  "critical",
+        "weight":    0.90,
+    },
 }
 
 # ── pattern constants ─────────────────────────────────────────────────────────
@@ -361,6 +382,28 @@ def _extract_unusual_ports(norm: dict) -> list[Indicator]:
     return [_ind("exfiltration_unusual_port", connections=unusual[:5])]
 
 
+def _extract_bait_access(norm: dict) -> list[Indicator]:
+    planted = norm.get("bait_planted") or {}
+    planted_paths = set(planted.get("planted_paths") or [])
+    if not planted_paths:
+        return []
+    sens = norm.get("telemetry", {}).get("sensitive_file_events", [])
+    accessed = {
+        ev.get("path") for ev in sens
+        if ev.get("path") in planted_paths
+    }
+    n = len(accessed)
+    if n == 0:
+        return []
+    if n == 1:
+        id_ = "bait_probe"
+    elif n <= 3:
+        id_ = "bait_enumeration"
+    else:
+        id_ = "bait_credential_harvest"
+    return [_ind(id_, accessed_paths=sorted(accessed), total_planted=len(planted_paths))]
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 _EXTRACTORS = [
@@ -380,6 +423,7 @@ _EXTRACTORS = [
     _extract_baseline_diff,
     _extract_file_discovery,
     _extract_unusual_ports,
+    _extract_bait_access,
 ]
 
 

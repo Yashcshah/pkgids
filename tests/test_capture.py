@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pkgids.bait import BaitFile, BaitManifest
 from pkgids.capture import (
     _discover_submodule,
     _has_network,
@@ -303,6 +304,17 @@ class TestPhaseStatus:
 
 # ── run() orchestrator tests (Docker calls mocked) ───────────────────────────
 
+_FAKE_BAIT_MANIFEST = BaitManifest(
+    run_id="testrunid0",
+    files=[
+        BaitFile(path="/home/deton/.env",             category="env_file",        size=80),
+        BaitFile(path="/home/deton/.aws/credentials", category="aws_credentials", size=95),
+        BaitFile(path="/home/deton/.pypirc",          category="pypi_rc",         size=70),
+        BaitFile(path="/home/deton/.ssh/id_rsa",      category="ssh_keys",        size=110),
+    ],
+)
+
+
 def _fake_sandbox_start(capture_log: str | None = None) -> dict:
     return {
         "container_name":    "pkgids-mock",
@@ -338,7 +350,7 @@ def _patch_all(fake_artifact: Path, run_dir: Path,
                phase_entries: list[dict] | None = None):
     """Patch all heavy calls in capture.run() for unit testing.
 
-    Patch order (9 total):
+    Patch order (10 total):
         [0] fetch
         [1] start_sandbox_container
         [2] exec_in_sandbox
@@ -348,6 +360,7 @@ def _patch_all(fake_artifact: Path, run_dir: Path,
         [6] _stop_tcpdump
         [7] _read_phase_entries
         [8] read_container_file   ← strace trace log (None = no telemetry/log empty)
+        [9] bait.plant_bait       ← Phase 4 bait planting (docker exec calls)
 
     phase_entries: what _read_phase_entries returns for every phase call.
                    Pass [] for 'no network activity' (default),
@@ -365,6 +378,7 @@ def _patch_all(fake_artifact: Path, run_dir: Path,
         patch("pkgids.capture._stop_tcpdump"),
         patch("pkgids.capture._read_phase_entries",     return_value=phase_entries),
         patch("pkgids.capture.read_container_file",     return_value=None),
+        patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
     ]
 
 
@@ -379,7 +393,7 @@ def _run_mocked(fake_artifact, tmp_path, phase_entries=None, **kwargs):
     p = _patch_all(fake_artifact, run_dir, phase_entries)
     kwargs.setdefault("post_install_idle_secs", 0)
     kwargs.setdefault("post_import_idle_secs",  0)
-    with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+    with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
         return run("pypi", "six", "1.16.0", run_dir=run_dir, **kwargs)
 
 
@@ -387,7 +401,7 @@ class TestRunOrchestrator:
     def test_creates_run_dir(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir)
         assert run_dir.is_dir()
 
@@ -508,7 +522,7 @@ class TestRunOrchestrator:
     def test_skip_import_calls_exec_once(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir, skip_import=True,
                 post_install_idle_secs=0, post_import_idle_secs=0)
         assert mock_exec.call_count == 1
@@ -516,7 +530,7 @@ class TestRunOrchestrator:
     def test_full_run_calls_exec_twice(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir, skip_import=False,
                 post_install_idle_secs=0, post_import_idle_secs=0)
         assert mock_exec.call_count == 2
@@ -524,7 +538,7 @@ class TestRunOrchestrator:
     def test_idle_phases_increase_exec_count(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir, skip_import=False,
                 post_install_idle_secs=2, post_import_idle_secs=2)
         # install + post_install_idle + import + post_import_idle
@@ -533,7 +547,7 @@ class TestRunOrchestrator:
     def test_skip_import_with_idle_calls_exec_twice(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir, skip_import=True,
                 post_install_idle_secs=2, post_import_idle_secs=0)
         # install + post_install_idle only
@@ -571,6 +585,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -589,6 +604,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -613,6 +629,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -637,6 +654,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -705,6 +723,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          skip_import_on_install_failure=True,
@@ -728,6 +747,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          skip_import_on_install_failure=False,
@@ -821,6 +841,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=strace_log),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -863,6 +884,7 @@ class TestRunOrchestrator:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=strace_log),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -884,7 +906,7 @@ class TestRunOrchestrator:
     def test_idle_phases_appear_when_nonzero(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          post_install_idle_secs=2, post_import_idle_secs=2)
         assert "post_install_idle" in result["phases"]
@@ -900,7 +922,7 @@ class TestRunOrchestrator:
     def test_container_started_and_stopped(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1] as mock_start, p[2], p[3] as mock_stop, p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1] as mock_start, p[2], p[3] as mock_stop, p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir)
         mock_start.assert_called_once()
         mock_stop.assert_called_once()
@@ -910,7 +932,7 @@ class TestRunOrchestrator:
     def test_tcpdump_started_and_stopped(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5] as ms, p[6] as mp, p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5] as ms, p[6] as mp, p[7], p[8], p[9]:
             run("pypi", "six", "1.16.0", run_dir=run_dir)
         ms.assert_called_once()
         mp.assert_called_once()
@@ -926,6 +948,7 @@ class TestRunOrchestrator:
                   side_effect=RuntimeError("docker not available")),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir)
         assert result["outputs"]["capture_pcap"] is None
@@ -982,7 +1005,7 @@ class TestRunWithTriggers:
             ),
         ]
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          trigger_plans=plans,
                          post_install_idle_secs=0,
@@ -1024,6 +1047,7 @@ class TestRunWithTriggers:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          trigger_plans=plans,
@@ -1052,6 +1076,7 @@ class TestRunWithTriggers:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "six", "1.16.0", run_dir=run_dir,
                          skip_import_on_install_failure=True,
@@ -1074,7 +1099,7 @@ class TestCLIDetonate:
     def _cli(self, argv, fake_artifact, tmp_path, phase_entries=None):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir, phase_entries)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             from pkgids.cli import main
             return main(argv + ["--run-dir", str(run_dir)])
 
@@ -1088,7 +1113,7 @@ class TestCLIDetonate:
     def test_detonate_skip_import_flag(self, fake_artifact, tmp_path):
         run_dir = tmp_path / "run"
         p = _patch_all(fake_artifact, run_dir)
-        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2] as mock_exec, p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             from pkgids.cli import main
             main(["detonate", "pypi", "six", "1.16.0", "--skip-import", "--run-dir", str(run_dir)])
         # install + post_install_idle (config default = 2s); post_import_idle skipped
@@ -1103,7 +1128,7 @@ class TestWithDepsFlag:
         run_dir = tmp_path / "run1"
         patches = _patch_all(fake_artifact, run_dir)
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-             patches[5], patches[6], patches[7], patches[8]:
+             patches[5], patches[6], patches[7], patches[8], patches[9]:
             summary = run("pypi", "six", "1.16.0",
                           run_dir=run_dir,
                           post_install_idle_secs=0,
@@ -1115,7 +1140,7 @@ class TestWithDepsFlag:
         run_dir = tmp_path / "run2"
         patches = _patch_all(fake_artifact, run_dir)
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-             patches[5], patches[6], patches[7], patches[8]:
+             patches[5], patches[6], patches[7], patches[8], patches[9]:
             summary = run("pypi", "six", "1.16.0",
                           run_dir=run_dir,
                           with_deps=True,
@@ -1128,7 +1153,7 @@ class TestWithDepsFlag:
         run_dir = tmp_path / "run3"
         patches = _patch_all(fake_artifact, run_dir)
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-             patches[5], patches[6], patches[7], patches[8]:
+             patches[5], patches[6], patches[7], patches[8], patches[9]:
             summary = run("pypi", "six", "1.16.0",
                           run_dir=run_dir,
                           post_install_idle_secs=0,
@@ -1263,7 +1288,7 @@ class TestImportSubmoduleTrigger:
         art = self._make_requests_artifact(tmp_path)
         run_dir = tmp_path / "run"
         p = _patch_all(art, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             result = run("pypi", "requests", "2.0", run_dir=run_dir,
                          include_submodule=True,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -1286,7 +1311,7 @@ class TestImportSubmoduleTrigger:
         art = self._make_requests_artifact(tmp_path)
         run_dir = tmp_path / "run"
         p = _patch_all(art, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             result = run("pypi", "requests", "2.0", run_dir=run_dir,
                          include_submodule=True,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -1300,7 +1325,7 @@ class TestImportSubmoduleTrigger:
         art = self._make_requests_artifact(tmp_path)
         run_dir = tmp_path / "run"
         p = _patch_all(art, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             result = run("pypi", "requests", "2.0", run_dir=run_dir,
                          include_submodule=True,
                          post_install_idle_secs=0, post_import_idle_secs=0)
@@ -1313,7 +1338,7 @@ class TestImportSubmoduleTrigger:
         art = self._make_requests_artifact(tmp_path)
         run_dir = tmp_path / "run"
         p = _patch_all(art, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             run("pypi", "requests", "2.0", run_dir=run_dir,
                 include_submodule=True,
                 post_install_idle_secs=0, post_import_idle_secs=0)
@@ -1341,6 +1366,7 @@ class TestImportSubmoduleTrigger:
             patch("pkgids.capture._stop_tcpdump"),
             patch("pkgids.capture._read_phase_entries",     return_value=[]),
             patch("pkgids.capture.read_container_file",     return_value=None),
+            patch("pkgids.bait.plant_bait",                 return_value=_FAKE_BAIT_MANIFEST),
         ):
             result = run("pypi", "requests", "2.0", run_dir=run_dir,
                          include_submodule=True,
@@ -1363,7 +1389,7 @@ class TestImportSubmoduleTrigger:
         ]}))
         run_dir = tmp_path / "run"
         p = _patch_all(art, run_dir)
-        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]:
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]:
             result = run("pypi", "mypkg", "1.0", run_dir=run_dir,
                          include_submodule=True,
                          post_install_idle_secs=0, post_import_idle_secs=0)

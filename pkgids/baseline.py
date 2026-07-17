@@ -176,6 +176,16 @@ def extract_profile(
         any(v is True for v in na.values())
     )
 
+    _bait_planted_paths = set(
+        (summary.get("sandbox_meta") or {}).get("bait_planted", {}).get("planted_paths") or []
+    )
+    bait_files_accessed = len({
+        acc.get("path")
+        for pa in (install_pa, import_pa, submod_pa)
+        for acc in (pa.get("sensitive_file_accesses") or [])
+        if acc.get("path") in _bait_planted_paths
+    }) if _bait_planted_paths else 0
+
     return {
         "ecosystem":   summary.get("ecosystem"),
         "name":        summary.get("name"),
@@ -209,6 +219,7 @@ def extract_profile(
         "shell_cmd_count":        shell_cmd_count,
         "new_file_count":         new_file_count,
         "any_suspicious":         any_suspicious,
+        "bait_files_accessed":    bait_files_accessed,
 
         # Full JSONB blobs
         "install_process_activity": install_pa or None,

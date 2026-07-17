@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import bait as _bait
 from . import config as _cfg
 from . import telemetry as _telemetry
 from .fetch import fetch
@@ -820,6 +821,7 @@ def run(
     trigger_results:    list[TriggerResult] = []
     post_delay_records: list[dict | None]   = []
     completed_statuses: dict[str, str]      = {}
+    _bait_manifest:     _bait.BaitManifest | None = None
 
     try:
         # ── 5. [startup] — start the analysis container ───────────────────────
@@ -851,6 +853,15 @@ def run(
             )
             all_network_entries.extend(startup_entries)
             print(f"[detonate] container {sandbox_info['container_name']} ready", flush=True)
+
+            # ── Phase 4: plant synthetic credential bait ──────────────────────
+            _bait_manifest = _bait.plant_bait(
+                sandbox_info["container_name"], run_dir.name
+            )
+            print(
+                f"[detonate] bait planted ({len(_bait_manifest.files)} file(s))",
+                flush=True,
+            )
 
             # ── 6–9. Execute each trigger in plan order ───────────────────────
             for plan in trigger_plans:
@@ -1002,6 +1013,7 @@ def run(
             _install_plan is not None
             and _install_plan.trigger_id == "install_with_deps"
         ),
+        "bait_planted": _bait_manifest.to_dict() if _bait_manifest else {},
     }
 
     install_json_path         = run_dir / "install.json"
